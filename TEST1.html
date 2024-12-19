@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+  <title>Real-time Collaboration</title>
+  <style> 
+.center h2 {
+  color: #edcfc8; 
+  font-size: 24px;
+}
+
+button[type="button"] {
+  padding: 10px 20px;
+  margin: 10px;
+  border: none;
+  border-radius: 20px;
+  background-color: #007BFF; 
+  color: #ffffff;
+  font-size: 16px;
+  cursor: pointer;
+  transition: background-color 0.3s ease-in-out, transform 0.1s ease-in-out;
+}
+
+button[type="button"]:hover {
+  background-color: #0056b3; 
+  transform: scale(1.1);
+}
+
+button[type="button"]:active {
+  background-color: #004299; 
+  transform: scale(0.95);
+}
+
+
+   #videoPreviewContainer {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      margin-top: 0px; 
+
+    }
+
+    body {
+      font-family: 'Roboto', sans-serif; 
+  background-color: #d4c8c8; 
+    margin: 0;
+      padding: 0;
+      background-image: url('https://wallpapers.com/images/high/minimalist-abstract-93b8nv3kqdxyhb1y.webp'); 
+      background-size: cover;
+      background-repeat: no-repeat;
+      background-attachment: fixed;
+      background-position: center;
+      
+    }
+    #messages {
+      height: 300px;
+      overflow-y: scroll;
+      padding: 10px;
+      scroll-behavior: smooth;
+    }
+    #messages div {
+      margin-bottom: 5px;
+      padding: 8px 12px;
+      border-radius: 10px;
+      background-color: #ffffff;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+      display: flex;
+      justify-content: space-between; 
+    }
+    #messages div:last-child {
+      margin-bottom: 0;
+    }
+    .message-text {
+      flex: 1; 
+    }
+    .message-timestamp {
+      color: gray;
+      margin-left: 10px; 
+    }
+    input[type="text"] {
+      width: calc(100% - 80px);
+      padding: 10px;
+      margin: 10px;
+      border: none;
+      border-radius: 20px;
+      box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    }
+    button {
+      padding: 10px 20px;
+      margin: 10px;
+      border: none;
+      border-radius: 20px;
+      background-color: #4caf50;
+      color: #ffffff;
+      font-size: 16px;
+      cursor: pointer;
+      transition: background-color 0.3s ease-in-out, transform 0.1s ease-in-out;
+    }
+
+    button:hover {
+      background-color: #45a049;
+      transform: scale(1.1); 
+    } 
+    button:active {
+      background-color: #3e8e41;
+      transform: scale(0.95); 
+    }
+    .center {
+      text-align: center;
+    }
+    .whiteText {
+      color: white;
+    }
+    h2 {
+  color: #333; 
+  font-size: 24px; 
+}
+    input[type="text"]:hover {
+  border-color: #4caf50;
+}
+
+  </style>
+  </head>
+<body>
+  <div id="messages" class="center"></div>
+  
+  <div class="center">
+    <input type="text" id="messageInput" placeholder="Type your message">
+    <button onclick="sendMessage()"><i class="fas fa-paper-plane"></i>Send</button>
+  </div>
+
+  <div class="center">
+    <!-- <h2>Upload Audio File</h2>
+    <form action="/upload_audio" method="post" enctype="multipart/form-data" class="whiteText">
+      <input type="file" name="audioFile" accept="audio/*">
+      <button type="submit">Upload Audio</button>
+    </form> -->
+  
+    <h2>Upload Video File</h2>
+<div class="center">
+  <form id="videoUploadForm" enctype="multipart/form-data" class="whiteText">
+    <input type="file" id="videoFileInput" accept="video/*" onchange="previewVideo(event)">
+    <button type="button" onclick="uploadVideo()"><i class="fas fa-upload"></i> Upload Video</button>
+    <div id="videoPreviewContainer">
+      <video id="videoPreview" width="320" height="240" controls style="display: none;" ></video>
+
+    </div>
+  </form>
+</div>
+  </div>
+
+  <script>
+    const socket = new WebSocket('ws://localhost:3000');
+   
+    socket.addEventListener('message', (event) => {
+      const messagesContainer = document.getElementById('messages');
+      const newMessage = document.createElement('div');
+      newMessage.classList.add('message');
+  
+      const messageText = document.createElement('span');
+      messageText.classList.add('message-text');
+      
+      if (event.data instanceof Blob) {
+        const blobReader = new FileReader();
+        blobReader.onload = function () {
+          messageText.textContent = blobReader.result;
+        };
+        blobReader.readAsText(event.data);
+      } else {
+        messageText.textContent = event.data;
+      }
+
+      const timestamp = document.createElement('span');
+      timestamp.classList.add('message-timestamp');
+      timestamp.textContent = new Date().toLocaleTimeString();
+  
+      newMessage.appendChild(messageText);
+      newMessage.appendChild(timestamp);
+      messagesContainer.appendChild(newMessage);
+    });
+
+    function sendMessage() {
+      const messageInput = document.getElementById('messageInput');
+      const message = messageInput.value;
+      socket.send(message);
+      messageInput.value = '';
+    }
+
+    function uploadVideo() {
+  const fileInput = document.getElementById('videoFileInput');
+  const file = fileInput.files[0];
+
+  if (!file) {
+    alert('Please select a video file.');
+    return;
+  }
+
+  const formData = new FormData();
+  formData.append('videoFile', file);
+
+  fetch('/upload_video', {
+    method: 'POST',
+    body: formData
+  })
+    .then(response => {
+      if (response.ok) {
+        console.log('Video processing initiated.');
+        return response.json(); 
+      } else {
+        console.error('Error uploading video file.');
+        throw new Error('Error uploading video file.');
+      }
+    })
+    .then(data => {
+      console.log('Video processing completed:', data);
+      alert('Video processing completed! Click OK to download the enhanced video.');
+
+      const downloadLink = document.createElement('a');
+      downloadLink.href = `/download/${data.filename}`; 
+      downloadLink.download = 'enhanced_video.mp4';
+      downloadLink.click();
+    })
+    .catch(error => {
+      console.error('Error:', error);
+      alert('Error processing video.');
+    });
+}
+
+function previewVideo(event) {
+    const fileInput = event.target;
+    const file = fileInput.files[0];
+    
+    if (file) {
+      const videoPreview = document.getElementById('videoPreview');
+      
+      const videoURL = URL.createObjectURL(file);
+      videoPreview.src = videoURL;
+      
+      videoPreview.style.display = 'block';
+    }
+  }
+</script>
+</body>
+</html>
