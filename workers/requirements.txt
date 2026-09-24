@@ -1,0 +1,9 @@
+# Shared by every worker pool. Heavy per-media-type ML deps land in
+# requirements-image.txt / -audio.txt / -video.txt in later phases so a text
+# worker never pulls torch.
+celery[redis]==5.5.3
+redis==5.2.1
+anthropic>=0.49,<2
+# OpenAI-compatible endpoints (OpenRouter, Together, local vLLM). Only the HTTP
+# shape is used, so any gateway speaking that API works.
+openai>=1.40,<2

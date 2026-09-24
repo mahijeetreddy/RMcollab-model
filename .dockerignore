@@ -1,0 +1,41 @@
+# Every image builds from the repo root (compose uses `context: ..`), so this one
+# file governs all of them.
+
+# Dependencies are installed *inside* the image. Letting the host's copies in is
+# not just slower: `COPY gateway gateway` runs after `npm install` and would
+# overwrite the container's Linux node_modules with Windows-built ones. That only
+# happens to work while every dependency is pure JavaScript.
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+
+**/__pycache__
+**/*.py[cod]
+**/.venv
+**/venv
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+
+# Secrets reach containers through compose's env_file at runtime, never through
+# the image. Excluding them here means a future careless `COPY . .` cannot bake a
+# key into a layer that outlives the key.
+.env
+.env.*
+!.env.example
+
+# Runtime data, not source. storage/ holds users' uploaded recordings and images.
+storage
+models
+*.pth
+*.onnx
+*.bin
+
+# Not part of any image.
+.git
+.gitignore
+.vscode
+legacy
+*.log
+**/test-results
+**/playwright-report

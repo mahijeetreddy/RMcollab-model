@@ -1,0 +1,23 @@
+{
+  "name": "rmcollab",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Real-time collaboration platform with pluggable media enhancement",
+  "workspaces": [
+    "shared",
+    "gateway",
+    "client"
+  ],
+  "scripts": {
+    "up": "docker compose -f infra/docker-compose.yml up --build",
+    "down": "docker compose -f infra/docker-compose.yml down",
+    "logs": "docker compose -f infra/docker-compose.yml logs -f",
+    "build:shared": "npm run build -w shared",
+    "check:contracts": "node scripts/check-contracts.mjs",
+    "scale": "docker compose -f infra/docker-compose.yml up -d --scale gateway=2 --scale text-worker=3",
+    "loadtest": "node scripts/loadtest.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

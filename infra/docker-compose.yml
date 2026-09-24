@@ -1,0 +1,216 @@
+name: rmcollab
+
+# Four pools, each draining a single queue so they scale independently.
+#
+# Two images, because the split is worth it: text only needs an HTTP client, so
+# it runs the small image and stays fast to build and cheap to scale out. The
+# media pools need torch + ffmpeg, so they share the GPU image.
+x-worker: &worker
+  build:
+    context: ..
+    dockerfile: workers/Dockerfile
+  image: rmcollab-worker:latest
+  env_file:
+    - path: ../.env
+      required: false
+  environment: &worker-env
+    REDIS_URL: redis://redis:6379/0
+    STORAGE_ROOT: /data/storage
+  volumes:
+    - ../storage:/data/storage
+  depends_on:
+    redis:
+      condition: service_healthy
+
+x-ml-worker: &ml-worker
+  build:
+    context: ..
+    dockerfile: workers/Dockerfile.ml
+  image: rmcollab-worker-ml:latest
+  env_file:
+    - path: ../.env
+      required: false
+  environment: &ml-worker-env
+    REDIS_URL: redis://redis:6379/0
+    STORAGE_ROOT: /data/storage
+    # Model weights are large and downloaded on first use; a named volume keeps
+    # them across rebuilds so pools don't re-fetch on every image change.
+    TORCH_HOME: /models
+    XDG_CACHE_HOME: /models
+  volumes:
+    - ../storage:/data/storage
+    - models:/models
+  # Verified on an RTX 3050 via WSL2. Note this reservation is a hard requirement:
+  # without the NVIDIA runtime the container refuses to start rather than falling
+  # back. Strategies themselves do fall back to CPU, so a CPU-only deployment
+  # should drop this block rather than expect it to degrade on its own.
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: all
+            capabilities: [gpu]
+  depends_on:
+    redis:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: rmcollab
+      POSTGRES_PASSWORD: rmcollab
+      POSTGRES_DB: rmcollab
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rmcollab"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: gateway/Dockerfile
+    image: rmcollab-gateway:latest
+    environment:
+      PORT: "4000"
+      DATABASE_URL: postgres://rmcollab:rmcollab@postgres:5432/rmcollab
+      REDIS_URL: redis://redis:6379/0
+      STORAGE_ROOT: /data/storage
+      PUBLIC_BASE_URL: http://localhost:4000
+      # Must be identical across gateway replicas: a link minted by one is
+      # verified by whichever replica serves the request.
+      FILE_SIGNING_SECRET: ${FILE_SIGNING_SECRET:-dev-insecure-file-signing-secret}
+      # Local dev registers localhost listeners; production sets this to false.
+      WEBHOOK_ALLOW_PRIVATE_URLS: ${WEBHOOK_ALLOW_PRIVATE_URLS:-true}
+    # No host port: `--scale gateway=N` would collide on it. The lb publishes
+    # 4000 and spreads traffic across however many replicas are running.
+    expose:
+      - "4000"
+    volumes:
+      - ../storage:/data/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  lb:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    ports:
+      - "4000:4000"
+    depends_on:
+      - gateway
+
+  # Same image as the gateway, different entrypoint: it reuses the DB/Redis and
+  # shared code while running — and scaling — independently of the HTTP tier.
+  webhook-dispatcher:
+    build:
+      context: ..
+      dockerfile: gateway/Dockerfile
+    image: rmcollab-gateway:latest
+    command: ["node", "dist/webhooks/dispatcher.js"]
+    environment:
+      DATABASE_URL: postgres://rmcollab:rmcollab@postgres:5432/rmcollab
+      REDIS_URL: redis://redis:6379/0
+      REPLICA_ID: ${WEBHOOK_REPLICA_ID:-wh-1}
+      WEBHOOK_ALLOW_PRIVATE_URLS: ${WEBHOOK_ALLOW_PRIVATE_URLS:-true}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  text-worker:
+    <<: *worker
+    environment:
+      <<: *worker-env
+      CELERY_QUEUES: enhance.text
+      CELERY_CONCURRENCY: "4"
+      # Provider indirection lives in workers/common/llm.py. Set either the
+      # Anthropic key, or the three LLM_* vars for any OpenAI-compatible gateway.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-opus-5}
+      CLAUDE_EFFORT: ${CLAUDE_EFFORT:-low}
+      LLM_PROVIDER: ${LLM_PROVIDER:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+
+  # Concurrency below is sized by VRAM, not CPU: the target card has 4GB total,
+  # so the pools that load a model stay narrow to avoid CUDA OOM when several
+  # jobs land at once.
+  image-worker:
+    <<: *ml-worker
+    environment:
+      <<: *ml-worker-env
+      CELERY_QUEUES: enhance.image
+      CELERY_CONCURRENCY: "1"
+
+  audio-worker:
+    <<: *ml-worker
+    environment:
+      <<: *ml-worker-env
+      CELERY_QUEUES: enhance.audio
+      # Audio models are small and the default strategy is CPU-only.
+      CELERY_CONCURRENCY: "2"
+      # Phase 4 chains transcribe -> summarise in this pool, so it needs the
+      # same provider configuration the text pool has.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-opus-5}
+      CLAUDE_EFFORT: ${CLAUDE_EFFORT:-low}
+      LLM_PROVIDER: ${LLM_PROVIDER:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+
+  video-worker:
+    <<: *ml-worker
+    environment:
+      <<: *ml-worker-env
+      CELERY_QUEUES: enhance.video
+      # Slowest and heaviest: one clip at a time per container.
+      CELERY_CONCURRENCY: "1"
+
+  client:
+    build:
+      context: ..
+      dockerfile: client/Dockerfile
+    environment:
+      VITE_GATEWAY_HTTP: http://localhost:4000
+      VITE_GATEWAY_WS: ws://localhost:4000/ws
+    # This runs the Vite dev server, so the source has to be live: without these
+    # mounts the image bakes a snapshot at build time and every edit silently
+    # does nothing until a rebuild. Mount the source paths only, so the image's
+    # node_modules stays visible.
+    volumes:
+      - ../client/src:/app/client/src
+      - ../client/public:/app/client/public
+      - ../client/index.html:/app/client/index.html
+    ports:
+      - "5173:5173"
+    depends_on:
+      - gateway
+
+volumes:
+  pgdata:
+  models:

@@ -1,0 +1,10 @@
+/// <reference types="vite/client" />
+
+interface ImportMetaEnv {
+  readonly VITE_GATEWAY_HTTP?: string;
+  readonly VITE_GATEWAY_WS?: string;
+}
+
+interface ImportMeta {
+  readonly env: ImportMetaEnv;
+}

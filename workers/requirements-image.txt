@@ -1,0 +1,15 @@
+# Image pool dependencies. Installed into workers/Dockerfile.ml alongside torch.
+#
+# Torch/torchvision are NOT listed on purpose: the Dockerfile installs the cu124
+# wheels from download.pytorch.org, and naming them here would pull the CPU wheels
+# from PyPI over the top of them.
+#
+# basicsr/realesrgan are NOT used either - basicsr imports
+# torchvision.transforms.functional_tensor, removed in torchvision 0.17, so it
+# cannot coexist with these wheels. workers/strategies/image/_rrdbnet.py carries
+# the RRDBNet architecture instead and loads the official x4plus checkpoint.
+opencv-python-headless==4.10.0.84
+# Deliberately a range, not a pin: the Dockerfile resolves image/audio/video in one
+# pip pass and the audio pool's deepfilternet caps numpy at <2. Both 1.26 and 2.x work
+# with torch 2.6.0+cu124 and with the strategies here.
+numpy>=1.26,<3

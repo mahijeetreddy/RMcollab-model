@@ -1,0 +1,16 @@
+# Audio pool dependencies. Installed into workers/Dockerfile.ml alongside torch.
+#
+# Torch is deliberately absent: the Dockerfile already installed the cu124 wheels
+# and naming any torch-family package here would pull CPU wheels over them.
+# DeepFilterNet's only torch-family import is torchaudio, which it uses for file
+# I/O we do with ffmpeg instead, so workers/strategies/audio/deepfilternet.py
+# stubs that import rather than pinning torchaudio to the torch build.
+#
+# deepfilternet caps numpy below 2.0 (its libdf extension is built against the
+# numpy 1.x C API); keep the image/video pins compatible with that.
+noisereduce==3.0.3
+deepfilternet==0.5.6
+# Speech-to-text. Runs on CTranslate2 rather than torch, so it brings its own
+# CUDA story: if cuDNN/cuBLAS are missing the strategy falls back to CPU int8
+# instead of failing the job.
+faster-whisper==1.1.1

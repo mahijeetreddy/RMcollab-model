@@ -1,0 +1,23 @@
+# Video pool dependencies. Installed into workers/Dockerfile.ml alongside torch.
+#
+# Deliberately empty. The video strategies need nothing that is not already in the
+# image:
+#
+#   ffmpeg / ffprobe  - apt binaries from Dockerfile.ml, not pip packages. All the
+#                       container work (decode to PNG frames, x264 encode, remux the
+#                       original audio) is shelled out to them; there is no pip video
+#                       library here on purpose, so nothing can pin over torch.
+#   opencv-python-headless, numpy
+#                     - already come from requirements-image.txt, which is installed
+#                       into the same image in the same pip pass. Re-pinning them here
+#                       would let pip resolve two different answers; in particular numpy
+#                       must stay <2 because the audio pool's deepfilternet builds its
+#                       libdf extension against the numpy 1.x C API.
+#   torch / torchvision
+#                     - already installed from the cu124 index by the Dockerfile.
+#                       Naming them here would pull the CPU wheels over the top.
+#
+# workers/strategies/video/realesrgan.py reuses the image pool's loaded RRDBNet through
+# workers.strategies.image.realesrgan.Upscaler, and workers/strategies/video/classical.py
+# reuses workers.strategies.image.classical.enhance_bgr, so the video pool inherits the
+# image pool's dependency set rather than adding one.

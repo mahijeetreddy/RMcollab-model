@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "CommonJS",
+    "moduleResolution": "node",
+
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+
+    // Archived code: not a workspace, so it has no node_modules of its own.
+    // express/multer/node types hoist to the repo root; ws only exists under
+    // the gateway's tree.
+    "baseUrl": ".",
+    "typeRoots": ["../node_modules/@types", "../gateway/node_modules/@types"],
+    "paths": {
+      "express": ["../node_modules/@types/express"],
+      "multer": ["../node_modules/@types/multer"],
+      "ws": ["../gateway/node_modules/@types/ws"]
+    }
+  },
+  "include": ["server.ts", "uploads.ts"]
+}

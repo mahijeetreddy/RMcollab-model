@@ -1,7 +1,7 @@
-const fs = require("fs");
-const path = require("path");
+import fs from "fs";
+import path from "path";
 
-const uploadsDirectory = path.join(__dirname, "uploads");
+const uploadsDirectory: string = path.join(__dirname, "uploads");
 
 if (!fs.existsSync(uploadsDirectory)) {
   fs.mkdirSync(uploadsDirectory);
