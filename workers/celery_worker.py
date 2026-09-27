@@ -6,7 +6,7 @@ import logging
 
 from workers.common.app import app
 from workers.common.config import get_config
-from workers.common.strategies import list_strategies, load_strategies
+from workers.common.strategies import load_strategies, registered_strategies, restrict_loading
 from workers.tasks import enhance  # noqa: F401 - import registers rmcollab.enhance
 
 log = logging.getLogger(__name__)
@@ -15,9 +15,11 @@ log = logging.getLogger(__name__)
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     config = get_config()
+    # Set before the pool forks, so every child inherits it.
+    restrict_loading(config.media_types)
     load_strategies(config.media_types)
 
-    for info in list_strategies():
+    for info in registered_strategies():
         log.info(
             "strategy %s/%s%s - %s",
             info.media_type, info.name, " (default)" if info.is_default else "", info.label,

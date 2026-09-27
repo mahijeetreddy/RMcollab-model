@@ -1,0 +1,3 @@
+# Test-only. Not installed into any worker image.
+-r requirements.txt
+pytest>=8,<9

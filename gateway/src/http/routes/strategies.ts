@@ -2,6 +2,7 @@ import type { MediaType, StrategyDescriptor } from "@rmcollab/shared";
 import { Router } from "express";
 import { Redis } from "ioredis";
 import { config } from "../../config.js";
+import { buildCatalogue, queueFor, type Catalogue, type StrategyAdvert } from "../../queue/routing.js";
 
 // Workers advertise what they can actually run into Redis under a TTL and
 // refresh it on a heartbeat (workers/common/advertise.py). The gateway only
@@ -14,7 +15,7 @@ const REFRESH_MS = 15_000;
 export const DEFAULT_STRATEGY = "auto";
 
 let client: Redis | null = null;
-let cache: StrategyDescriptor[] = [];
+let catalogue: Catalogue = buildCatalogue([]);
 let timer: NodeJS.Timeout | null = null;
 
 function redis(): Redis {
@@ -38,44 +39,23 @@ async function scanKeys(): Promise<string[]> {
 
 export async function refreshStrategies(): Promise<StrategyDescriptor[]> {
   const keys = await scanKeys();
-  if (keys.length === 0) {
-    cache = [];
-    return cache;
-  }
-
-  const values = await redis().mget(keys);
-  const parsed: StrategyDescriptor[] = [];
+  const values = keys.length > 0 ? await redis().mget(keys) : [];
+  const adverts: StrategyAdvert[] = [];
   for (const value of values) {
     if (!value) continue;
     try {
-      const info = JSON.parse(value) as {
-        name: string;
-        label: string;
-        description: string;
-        media_type: MediaType;
-        is_default: boolean;
-        available: boolean;
-      };
-      parsed.push({
-        mediaType: info.media_type,
-        name: info.name,
-        label: info.label,
-        description: info.description,
-        isDefault: info.is_default,
-        available: info.available,
-      });
+      adverts.push(JSON.parse(value) as StrategyAdvert);
     } catch {
       // A malformed advert shouldn't blank the whole picker.
     }
   }
+  catalogue = buildCatalogue(adverts);
+  return catalogue.strategies;
+}
 
-  parsed.sort((a, b) =>
-    a.mediaType === b.mediaType
-      ? Number(b.isDefault) - Number(a.isDefault) || a.name.localeCompare(b.name)
-      : a.mediaType.localeCompare(b.mediaType),
-  );
-  cache = parsed;
-  return cache;
+/** Where a job for this strategy must be enqueued; see queue/routing.ts. */
+export function routeJob(mediaType: MediaType, strategy: string): string {
+  return queueFor(catalogue, mediaType, strategy, DEFAULT_STRATEGY);
 }
 
 export function startStrategyRefresh(): void {
@@ -99,7 +79,8 @@ export async function stopStrategyRefresh(): Promise<void> {
 export const strategiesRouter = Router();
 
 strategiesRouter.get("/api/strategies", async (_req, res) => {
-  const strategies = cache.length > 0 ? cache : await refreshStrategies();
+  const strategies =
+    catalogue.strategies.length > 0 ? catalogue.strategies : await refreshStrategies();
   res.json({ strategies });
 });
 
@@ -110,6 +91,6 @@ strategiesRouter.get("/api/strategies", async (_req, res) => {
  */
 export function isKnownStrategy(mediaType: MediaType, name: string): boolean {
   if (name === DEFAULT_STRATEGY) return true;
-  if (cache.length === 0) return true;
-  return cache.some((s) => s.mediaType === mediaType && s.name === name);
+  if (catalogue.strategies.length === 0) return true;
+  return catalogue.strategies.some((s) => s.mediaType === mediaType && s.name === name);
 }

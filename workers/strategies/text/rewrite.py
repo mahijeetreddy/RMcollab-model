@@ -45,7 +45,7 @@ class LLMRewrite(BaseEnhancer):
 
     @classmethod
     def available(cls) -> bool:
-        return llm.available()
+        return llm.available(llm.REWRITE)
 
     def enhance(
         self,
@@ -61,8 +61,10 @@ class LLMRewrite(BaseEnhancer):
         if len(source) > MAX_INPUT_CHARS:
             raise ValueError(f"input is {len(source)} chars, limit is {MAX_INPUT_CHARS}")
 
-        progress(0.1, f"rewriting with {llm.describe()}")
-        result = llm.complete(SYSTEM_PROMPT, source, max_tokens=_max_tokens_for(source))
+        progress(0.1, f"rewriting with {llm.describe(llm.REWRITE)}")
+        result = llm.complete(
+            SYSTEM_PROMPT, source, max_tokens=_max_tokens_for(source), task=llm.REWRITE
+        )
         progress(0.9, "writing result")
 
         output_path.write_text(result.text + "\n", encoding="utf-8")

@@ -71,20 +71,102 @@ def _load_model(size: str, requested_device: str | None) -> tuple[Any, str, str]
         return model, "cpu", DEFAULT_COMPUTE_CPU
 
 
+def whisper_available() -> bool:
+    return importlib.util.find_spec("faster_whisper") is not None
+
+
+def transcribe_file(
+    input_path: Path,
+    transcript_path: Path,
+    params: dict[str, Any],
+    progress: ProgressFn,
+    *,
+    base: float = 0.0,
+    span: float = 1.0,
+) -> ProducedArtifact:
+    """Transcribe `input_path` into `transcript_path`; return it as an artifact.
+
+    `base`/`span` map this step's 0..1 progress into a slice of a larger job, so
+    a pipeline that transcribes and then summarises reports one smooth bar
+    instead of two that each run from zero.
+    """
+
+    def step(fraction: float, message: str) -> None:
+        progress(base + span * fraction, message)
+
+    started = time.monotonic()
+    info = aio.probe(input_path)
+    if info.duration_s > MAX_DURATION_S:
+        raise ValueError(
+            f"{info.duration_s / 60:.0f} minute recording is over the "
+            f"{MAX_DURATION_S // 3600} hour limit"
+        )
+
+    size = str(params.get("model") or os.getenv("WHISPER_MODEL") or DEFAULT_MODEL)
+    step(0.04, f"loading Whisper {size}")
+    model, device, compute = _load_model(size, params.get("device"))
+
+    step(0.1, f"transcribing {info.duration_s:.0f}s on {device}")
+    segments, detected = model.transcribe(
+        str(input_path),
+        beam_size=int(params.get("beam_size") or 5),
+        vad_filter=bool(params.get("vad", True)),
+        language=params.get("language") or None,
+    )
+
+    # `segments` is a generator: the work happens as it is consumed, which is
+    # what makes real progress possible instead of one long silent block.
+    total = max(detected.duration or info.duration_s, 0.001)
+    lines: list[str] = []
+    for segment in segments:
+        text = segment.text.strip()
+        if text:
+            lines.append(f"[{_stamp(segment.start)}] {text}")
+        step(
+            min(0.98, 0.1 + 0.88 * (segment.end / total)),
+            f"{_stamp(segment.end)} / {_stamp(total)}",
+        )
+
+    if not lines:
+        raise TranscriptionUnavailable("no speech detected in this recording")
+
+    transcript_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    elapsed = time.monotonic() - started
+    return ProducedArtifact(
+        path=transcript_path,
+        kind="transcript",
+        label="Transcript",
+        mime_type="text/plain",
+        # Timings live inline in the file rather than here: a long recording has
+        # hundreds of segments, and meta rides along on every WS job event and
+        # room snapshot.
+        meta={
+            "language": detected.language,
+            "languageProbability": round(detected.language_probability or 0, 3),
+            "durationS": round(total, 2),
+            "segments": len(lines),
+            "model": size,
+            "device": device,
+            "computeType": compute,
+            "realTimeFactor": round(elapsed / total, 3),
+        },
+    )
+
+
 @register
 class WhisperTranscribe(BaseEnhancer):
     name = "transcribe"
     label = "Transcribe (Whisper)"
     description = (
         "Speech to text with faster-whisper, producing a timestamped transcript you can read, "
-        "search and quote. The starting point for turning a recording into something the room "
-        "can actually use. Runs on the GPU when there is room, CPU otherwise."
+        "search and quote. Transcript only - use \"Transcribe & summarise\" to also get key "
+        "points and action items. Runs on the GPU when there is room, CPU otherwise."
     )
     media_type = "audio"
 
     @classmethod
     def available(cls) -> bool:
-        return importlib.util.find_spec("faster_whisper") is not None
+        return whisper_available()
 
     def enhance(
         self,
@@ -93,73 +175,15 @@ class WhisperTranscribe(BaseEnhancer):
         params: dict[str, Any],
         progress: ProgressFn,
     ) -> EnhanceResult:
-        started = time.monotonic()
-        info = aio.probe(input_path)
-        if info.duration_s > MAX_DURATION_S:
-            raise ValueError(
-                f"{info.duration_s / 60:.0f} minute recording is over the "
-                f"{MAX_DURATION_S // 3600} hour limit"
-            )
-
-        size = str(params.get("model") or os.getenv("WHISPER_MODEL") or DEFAULT_MODEL)
-        progress(0.04, f"loading Whisper {size}")
-        model, device, compute = _load_model(size, params.get("device"))
-
-        progress(0.1, f"transcribing {info.duration_s:.0f}s on {device}")
-        segments, detected = model.transcribe(
-            str(input_path),
-            beam_size=int(params.get("beam_size") or 5),
-            vad_filter=bool(params.get("vad", True)),
-            language=params.get("language") or None,
+        artifact = transcribe_file(
+            input_path, output_path.with_name("transcript.txt"), params, progress
         )
-
-        # `segments` is a generator: the work happens as it is consumed, which is
-        # what makes real progress possible instead of one long silent block.
-        total = max(detected.duration or info.duration_s, 0.001)
-        lines: list[str] = []
-        count = 0
-        for segment in segments:
-            text = segment.text.strip()
-            if text:
-                lines.append(f"[{_stamp(segment.start)}] {text}")
-                count += 1
-            progress(
-                min(0.95, 0.1 + 0.85 * (segment.end / total)),
-                f"{_stamp(segment.end)} / {_stamp(total)}",
-            )
-
-        if not lines:
-            raise TranscriptionUnavailable("no speech detected in this recording")
-
-        transcript = output_path.with_name("transcript.txt")
-        transcript.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-        elapsed = time.monotonic() - started
+        meta = artifact.meta
         return EnhanceResult(
-            artifacts=[
-                ProducedArtifact(
-                    path=transcript,
-                    kind="transcript",
-                    label="Transcript",
-                    mime_type="text/plain",
-                    # Timings live inline in the file rather than here: a
-                    # long recording has hundreds of segments, and meta rides
-                    # along on every WS job event and room snapshot.
-                    meta={
-                        "language": detected.language,
-                        "languageProbability": round(detected.language_probability or 0, 3),
-                        "durationS": round(total, 2),
-                        "segments": count,
-                        "model": size,
-                        "device": device,
-                        "computeType": compute,
-                        "realTimeFactor": round(elapsed / total, 3),
-                    },
-                )
-            ],
+            artifacts=[artifact],
             message=(
-                f"transcribed {_stamp(total)} of {detected.language} audio "
-                f"into {count} segments on {device} ({elapsed:.0f}s)"
+                f"transcribed {_stamp(meta['durationS'])} of {meta['language']} audio "
+                f"into {meta['segments']} segments on {meta['device']}"
             ),
-            metrics={"seconds": round(elapsed, 2), "device": device, "model": size},
+            metrics={"device": meta["device"], "model": meta["model"]},
         )

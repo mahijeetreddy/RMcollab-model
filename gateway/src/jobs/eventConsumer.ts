@@ -2,7 +2,8 @@ import type { Artifact, JobEvent, ServerEvent } from "@rmcollab/shared";
 import { JOB_EVENT_STREAM } from "@rmcollab/shared";
 import { Redis } from "ioredis";
 import { config } from "../config.js";
-import { updateJobFromEvent } from "../db/repositories.js";
+import { getArtifactTexts, getMediaItem, updateJobFromEvent } from "../db/repositories.js";
+import { notesWriter } from "../notes/index.js";
 import { pubsub } from "../ws/pubsub.js";
 
 const GROUP = "gateway";
@@ -17,6 +18,7 @@ function toServerEvent(event: JobEvent, artifacts: Artifact[]): ServerEvent {
       mediaItemId: event.mediaItemId,
       status: event.status,
       artifacts,
+      ...(event.message ? { message: event.message } : {}),
       ...(event.error ? { error: event.error } : {}),
     };
   }
@@ -103,6 +105,14 @@ export class JobEventConsumer {
     if (!job) return;
 
     await pubsub.publishToRoom(event.roomId, toServerEvent(event, job.artifacts));
+
+    // Only a transition to done or failed reaches here once: a redelivered
+    // event finds the job already terminal and returns above. So each upload's
+    // section is filled exactly once, cluster-wide, after the room has heard.
+    if (job.status === "done" || job.status === "failed") {
+      const item = await getMediaItem(job.mediaItemId);
+      if (item) await notesWriter.finished(item, job, await getArtifactTexts(job.id));
+    }
   }
 
   async stop(): Promise<void> {

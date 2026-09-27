@@ -2,8 +2,11 @@ import http from "node:http";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { config } from "./config.js";
 import { migrate } from "./db/migrate.js";
+import { backfillArtifactBodies } from "./db/repositories.js";
+import { docHub } from "./docs/hub.js";
 import { pool } from "./db/pool.js";
 import { healthRouter } from "./http/routes/health.js";
+import { libraryRouter } from "./http/routes/library.js";
 import { filesRouter, mediaRouter } from "./http/routes/media.js";
 import { closeMetrics, metricsRouter } from "./http/routes/metrics.js";
 import { roomsRouter } from "./http/routes/rooms.js";
@@ -28,6 +31,10 @@ function cors(_req: Request, res: Response, next: NextFunction): void {
 
 async function main(): Promise<void> {
   await migrate();
+  // Off the boot path: indexing old documents must not delay taking traffic.
+  void backfillArtifactBodies()
+    .then((filled) => filled && console.log(`[library] indexed ${filled} existing documents`))
+    .catch((err: unknown) => console.warn("[library] backfill failed", err));
 
   const app = express();
   app.disable("x-powered-by");
@@ -41,6 +48,7 @@ async function main(): Promise<void> {
   app.use(strategiesRouter);
   app.use(metricsRouter);
   app.use(mediaRouter);
+  app.use(libraryRouter);
   app.use(webhooksRouter);
   app.use(filesRouter);
 
@@ -70,6 +78,9 @@ async function main(): Promise<void> {
     await new Promise<void>((resolve) => server.close(() => resolve()));
 
     await jobEventConsumer.stop();
+    // Unsaved note edits (at most one batch window's worth) go to Postgres
+    // before the pool closes.
+    await docHub.flushAll().catch((err: unknown) => console.error("[docs] final flush failed", err));
     await stopStrategyRefresh();
     await closeMetrics();
     await closeWebhookQueue();

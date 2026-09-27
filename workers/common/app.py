@@ -11,8 +11,9 @@ from kombu import Queue
 
 from workers.common.config import get_config
 from workers.common.contracts import QUEUES, TASK_ENHANCE
+from workers.common import llm
 from workers.common.events import reset_redis
-from workers.common.strategies import load_strategies
+from workers.common.strategies import load_strategies, restrict_loading
 
 log = logging.getLogger(__name__)
 
@@ -63,7 +64,12 @@ app.conf.update(
 @worker_process_init.connect
 def _on_worker_process_init(**_: Any) -> None:
     reset_redis()
+    restrict_loading(get_config().media_types)
     load_strategies(get_config().media_types)
+    # Every pool child gets its own model client, connected before its first job
+    # rather than during it; see llm.warm for why this is off the boot path.
+    llm.reset_clients()
+    llm.warm()
 
 
 @worker_ready.connect

@@ -1,5 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, open, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { config } from "../config.js";
 
@@ -8,6 +8,8 @@ export interface StorageAdapter {
   /** Absolute on-disk path; throws if relPath escapes the storage root. */
   resolve(relPath: string): string;
   publicUrl(relPath: string): string;
+  /** Up to `maxBytes` of a stored file as UTF-8, or null if it cannot be read. */
+  readText(relPath: string, maxBytes: number): Promise<string | null>;
 }
 
 const root = path.resolve(config.storageRoot);
@@ -27,6 +29,22 @@ class LocalStorage implements StorageAdapter {
     const absolute = this.resolve(relPath);
     await mkdir(path.dirname(absolute), { recursive: true });
     await writeFile(absolute, data);
+  }
+
+  async readText(relPath: string, maxBytes: number): Promise<string | null> {
+    let handle;
+    try {
+      handle = await open(this.resolve(relPath), "r");
+      const buffer = Buffer.alloc(maxBytes);
+      const { bytesRead } = await handle.read(buffer, 0, maxBytes, 0);
+      // A cut can land inside a multi-byte character; the decoder turns that
+      // tail into U+FFFD, which is dropped rather than indexed.
+      return buffer.subarray(0, bytesRead).toString("utf8").replace(/\uFFFD+$/, "");
+    } catch {
+      return null;
+    } finally {
+      await handle?.close();
+    }
   }
 
   publicUrl(relPath: string): string {

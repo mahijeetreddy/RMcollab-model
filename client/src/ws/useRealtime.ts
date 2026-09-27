@@ -21,7 +21,16 @@ export interface Realtime {
   sendChat: (body: string) => boolean;
   reconnectNow: () => void;
   clearError: () => void;
+  /** Sends one shared-notes frame (base64 y-protocols) for the current room. */
+  sendDoc: (roomId: string, data: string) => boolean;
+  /**
+   * Shared-notes frames bypass the reducer: they arrive per keystroke, and the
+   * editor's CRDT - not React state - is where the document lives.
+   */
+  subscribeDoc: (listener: DocListener) => () => void;
 }
+
+export type DocListener = (roomId: string, data: string) => void;
 
 const BASE_BACKOFF_MS = 500;
 const MAX_BACKOFF_MS = 15_000;
@@ -60,6 +69,7 @@ export function useRealtime(credentials: Credentials | null): Realtime {
   const [attempt, setAttempt] = useState(0);
 
   const socketRef = useRef<WebSocket | null>(null);
+  const docListenersRef = useRef(new Set<DocListener>());
   const attemptRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
   const heartbeatTimerRef = useRef<number | null>(null);
@@ -195,6 +205,11 @@ export function useRealtime(credentials: Credentials | null): Realtime {
           return;
         }
 
+        if (event.type === "doc") {
+          for (const listener of docListenersRef.current) listener(event.roomId, event.data);
+          return;
+        }
+
         if (event.type === "session_joined") {
           participantIdRef.current = event.participant.id;
           dispatch({ type: "server_event", event });
@@ -318,8 +333,31 @@ export function useRealtime(credentials: Credentials | null): Realtime {
 
   const clearError = useCallback(() => dispatch({ type: "clear_error" }), []);
 
+  const sendDoc = useCallback(
+    (roomId: string, data: string) => send({ type: "doc", roomId, data }),
+    [send],
+  );
+
+  const subscribeDoc = useCallback((listener: DocListener) => {
+    docListenersRef.current.add(listener);
+    return () => {
+      docListenersRef.current.delete(listener);
+    };
+  }, []);
+
   return useMemo(
-    () => ({ state, status, attempt, joinRoom, sendChat, sendTyping, reconnectNow, clearError }),
-    [state, status, attempt, joinRoom, sendChat, sendTyping, reconnectNow, clearError],
+    () => ({
+      state,
+      status,
+      attempt,
+      joinRoom,
+      sendChat,
+      sendTyping,
+      reconnectNow,
+      clearError,
+      sendDoc,
+      subscribeDoc,
+    }),
+    [state, status, attempt, joinRoom, sendChat, sendTyping, reconnectNow, clearError, sendDoc, subscribeDoc],
   );
 }

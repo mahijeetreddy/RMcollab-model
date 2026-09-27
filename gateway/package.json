@@ -8,16 +8,20 @@
     "build": "tsc -p tsconfig.json",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "@rmcollab/shared": "*",
     "express": "^4.21.2",
     "ioredis": "^5.4.2",
+    "lib0": "^0.2.117",
     "multer": "^2.0.1",
     "nanoid": "^5.0.9",
     "pg": "^8.13.1",
     "ws": "^8.18.0",
+    "y-protocols": "^1.0.7",
+    "yjs": "^13.6.33",
     "zod": "^3.24.1"
   },
   "devDependencies": {
@@ -27,6 +31,7 @@
     "@types/pg": "^8.11.10",
     "@types/ws": "^8.5.13",
     "tsx": "^4.19.2",
-    "typescript": "^5.6.3"
+    "typescript": "^5.6.3",
+    "vitest": "^3.2.7"
   }
 }

@@ -17,7 +17,8 @@ from dataclasses import asdict
 
 from workers.common.config import get_config
 from workers.common.events import get_redis
-from workers.common.strategies import list_strategies, load_strategies
+from workers.common.contracts import QUEUES, StrategyAdvert
+from workers.common.strategies import load_strategies, registered_strategies
 
 log = logging.getLogger(__name__)
 
@@ -37,19 +38,32 @@ def publish_strategies() -> int:
     client = get_redis()
     pipe = client.pipeline()
     count = 0
-    # Scoped per media type, never a bare list_strategies(): that loads *every*
+    # What is registered, never a bare list_strategies(): that loads *every*
     # media type, and the light text image has no numpy/torch to import the ML
     # strategies with, so advertising would die on a pool it does not serve.
-    for media_type in media_types:
-        for info in list_strategies(media_type):
-            pipe.set(
-                f"{KEY_PREFIX}:{info.media_type}:{info.name}",
-                json.dumps(asdict(info)),
-                ex=TTL_S,
-            )
-            count += 1
+    for info in registered_strategies(owned_by=media_types):
+        pipe.set(
+            f"{KEY_PREFIX}:{info.media_type}:{info.name}",
+            json.dumps(asdict(StrategyAdvert(**asdict(info), queue=serving_queue(info.media_type, config.celery_queues)))),
+            ex=TTL_S,
+        )
+        count += 1
     pipe.execute()
     return count
+
+
+def serving_queue(media_type: str, consumed: tuple[str, ...]) -> str:
+    """The queue a job for this strategy must be sent to so this pool receives it.
+
+    Usually the media type's own queue. A strategy registered outside its media
+    type's pool - video comprehension, which lives with Whisper in the audio
+    pool - is served on the queue this pool actually drains. The gateway routes
+    by this, not by media type alone.
+    """
+    home = QUEUES.get(media_type)
+    if home in consumed or not consumed:
+        return home or QUEUES["text"]
+    return consumed[0]
 
 
 def start_heartbeat() -> None:

@@ -72,6 +72,10 @@ class StrategyInfo:
     media_type: MediaType
     is_default: bool
     available: bool
+    # Declared with @register(default=True), as opposed to a pool falling back to
+    # whatever it has. The gateway merges adverts from every pool and uses this
+    # to pick one default per media type: declared beats fallen-back.
+    explicit_default: bool = False
 
 
 class BaseEnhancer(ABC):
@@ -108,13 +112,22 @@ class BaseEnhancer(ABC):
             media_type=cls.media_type,
             is_default=_resolve_default_name(cls.media_type) == cls.name,
             available=cls.available(),
+            explicit_default=_EXPLICIT_DEFAULTS.get(cls.media_type) == cls.name,
         )
 
 
 _REGISTRY: dict[tuple[MediaType, str], type[BaseEnhancer]] = {}
 _DEFAULTS: dict[MediaType, str] = {}
 _EXPLICIT_DEFAULTS: dict[MediaType, str] = {}
+# What to use when the declared default cannot run. Without it the answer is
+# whichever module happened to import first - for images, the fast classical
+# filter instead of the GAN, whenever no vision model is configured.
+_FALLBACKS: dict[MediaType, str] = {}
 _LOADED: set[MediaType] = set()
+# Which strategy packages this process may import; None means all of them. A
+# pool is scoped to the packages it serves, so a job it receives for another
+# media type cannot drag that package in - see restrict_loading().
+_SCOPE: frozenset[MediaType] | None = None
 
 
 def _validate(cls: type[BaseEnhancer]) -> None:
@@ -133,8 +146,10 @@ def register(
     cls: type[BaseEnhancer] | None = None,
     *,
     default: bool = False,
+    fallback: bool = False,
 ) -> Any:
-    """Register an enhancer. Usable bare (`@register`) or as `@register(default=True)`."""
+    """Register an enhancer. Usable bare (`@register`), as `@register(default=True)`,
+    or as `@register(fallback=True)` for the choice when the default cannot run."""
 
     def apply(target: type[BaseEnhancer]) -> type[BaseEnhancer]:
         _validate(target)
@@ -156,9 +171,31 @@ def register(
             _DEFAULTS[target.media_type] = target.name
         elif target.media_type not in _DEFAULTS:
             _DEFAULTS[target.media_type] = target.name
+        if fallback:
+            claimed = _FALLBACKS.get(target.media_type)
+            if claimed is not None and claimed != target.name:
+                raise StrategyError(
+                    f"two fallbacks for {target.media_type!r}: {claimed!r} and {target.name!r}"
+                )
+            _FALLBACKS[target.media_type] = target.name
         return target
 
     return apply(cls) if cls is not None else apply
+
+
+def restrict_loading(media_types: Iterable[MediaType]) -> None:
+    """Limit this process to the strategy packages it serves.
+
+    Registration is by the class's own media type, not by the package it lives
+    in, so the audio package can register a *video* strategy that needs Whisper:
+    the audio pool then runs video comprehension and the video pool never loads
+    it. Without a scope that breaks the first time such a job arrives -
+    resolving a video strategy imports the whole video package (Real-ESRGAN,
+    torch) into the audio pool, which would then advertise upscaling it cannot
+    route and should not run.
+    """
+    global _SCOPE
+    _SCOPE = frozenset(media_types)
 
 
 def load_strategies(media_types: Iterable[MediaType] | None = None) -> None:
@@ -166,6 +203,8 @@ def load_strategies(media_types: Iterable[MediaType] | None = None) -> None:
     targets = tuple(media_types) if media_types is not None else MEDIA_TYPES
     for media_type in targets:
         if media_type in _LOADED:
+            continue
+        if _SCOPE is not None and media_type not in _SCOPE:
             continue
         _LOADED.add(media_type)
         package_name = f"{STRATEGY_PACKAGE}.{media_type}"
@@ -189,10 +228,14 @@ def get_strategy(media_type: MediaType, name: str) -> type[BaseEnhancer]:
 
 
 def _resolve_default_name(media_type: MediaType) -> str | None:
-    """The declared default, unless it is unavailable and something else isn't."""
+    """The declared default if it can run, then the declared fallback, then
+    anything that can run; the declared default if nothing can."""
     declared = _DEFAULTS.get(media_type)
     if declared is not None and _REGISTRY[(media_type, declared)].available():
         return declared
+    preferred = _FALLBACKS.get(media_type)
+    if preferred is not None and (media_type, preferred) in _REGISTRY and _REGISTRY[(media_type, preferred)].available():
+        return preferred
     for (mt, name), cls in _REGISTRY.items():
         if mt == media_type and cls.available():
             return name
@@ -205,6 +248,32 @@ def default_strategy(media_type: MediaType) -> type[BaseEnhancer]:
     if name is None:
         raise StrategyNotFound(f"no strategies registered for {media_type!r}")
     return _REGISTRY[(media_type, name)]
+
+
+def owning_package(cls: type[BaseEnhancer]) -> str:
+    """The strategy package a class is defined in: 'audio' for
+    workers.strategies.audio.comprehend_video, whatever media type it serves."""
+    prefix = f"{STRATEGY_PACKAGE}."
+    module = cls.__module__
+    return module[len(prefix) :].split(".", 1)[0] if module.startswith(prefix) else ""
+
+
+def registered_strategies(owned_by: Iterable[str] | None = None) -> list[StrategyInfo]:
+    """What this process has registered, without importing anything more.
+
+    `owned_by` keeps only strategies defined in those packages. Registration can
+    happen as a side effect - video upscaling imports the image Real-ESRGAN
+    module, which registers the image strategies in the video pool - and a pool
+    must not advertise what it merely imported, or two pools claim one strategy
+    and whichever wrote last decides where its jobs go.
+    """
+    owned = set(owned_by) if owned_by is not None else None
+    items = [
+        cls.info()
+        for cls in _REGISTRY.values()
+        if owned is None or owning_package(cls) in owned
+    ]
+    return sorted(items, key=lambda i: (i.media_type, not i.is_default, i.name))
 
 
 def list_strategies(media_type: MediaType | None = None) -> list[StrategyInfo]:

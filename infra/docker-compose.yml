@@ -146,15 +146,12 @@ services:
       <<: *worker-env
       CELERY_QUEUES: enhance.text
       CELERY_CONCURRENCY: "4"
-      # Provider indirection lives in workers/common/llm.py. Set either the
-      # Anthropic key, or the three LLM_* vars for any OpenAI-compatible gateway.
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-opus-5}
-      CLAUDE_EFFORT: ${CLAUDE_EFFORT:-low}
-      LLM_PROVIDER: ${LLM_PROVIDER:-}
-      LLM_BASE_URL: ${LLM_BASE_URL:-}
-      LLM_API_KEY: ${LLM_API_KEY:-}
-      LLM_MODEL: ${LLM_MODEL:-}
+      # Provider settings (ANTHROPIC_API_KEY, or the three LLM_* vars) arrive
+      # through env_file from the repo-root .env. They are deliberately not
+      # listed here: `environment` beats `env_file`, and a `${VAR:-}` entry is
+      # interpolated from infra/.env or the shell - not the root .env - so it
+      # silently replaced every configured key with an empty string. Defaults
+      # (model, effort) live in workers/common/llm.py.
 
   # Concurrency below is sized by VRAM, not CPU: the target card has 4GB total,
   # so the pools that load a model stay narrow to avoid CUDA OOM when several
@@ -174,14 +171,7 @@ services:
       # Audio models are small and the default strategy is CPU-only.
       CELERY_CONCURRENCY: "2"
       # Phase 4 chains transcribe -> summarise in this pool, so it needs the
-      # same provider configuration the text pool has.
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      CLAUDE_MODEL: ${CLAUDE_MODEL:-claude-opus-5}
-      CLAUDE_EFFORT: ${CLAUDE_EFFORT:-low}
-      LLM_PROVIDER: ${LLM_PROVIDER:-}
-      LLM_BASE_URL: ${LLM_BASE_URL:-}
-      LLM_API_KEY: ${LLM_API_KEY:-}
-      LLM_MODEL: ${LLM_MODEL:-}
+      # same provider configuration as the text pool, which env_file provides.
 
   video-worker:
     <<: *ml-worker
@@ -201,7 +191,9 @@ services:
     # This runs the Vite dev server, so the source has to be live: without these
     # mounts the image bakes a snapshot at build time and every edit silently
     # does nothing until a rebuild. Mount the source paths only, so the image's
-    # node_modules stays visible.
+    # node_modules stays visible. `shared` is NOT live: it is compiled into the
+    # image, so a new runtime export there (not just a type) needs
+    # `docker compose build client`, or the page fails to load its imports.
     volumes:
       - ../client/src:/app/client/src
       - ../client/public:/app/client/public

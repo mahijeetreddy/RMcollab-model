@@ -5,6 +5,7 @@ import type {
   ChatMessage,
   EnhancementJob,
   JobStatus,
+  LibraryEntry,
   MediaItem,
   MediaItemWithJob,
   MediaType,
@@ -138,6 +139,17 @@ export const isMediaItemWithJob: Guard<MediaItemWithJob> = (value): value is Med
   isMediaItem(value["mediaItem"]) &&
   nullable(isEnhancementJob)(value["job"]);
 
+export const isLibraryEntry: Guard<LibraryEntry> = (value): value is LibraryEntry =>
+  isRecord(value) &&
+  isArtifact(value["artifact"]) &&
+  isString(value["mediaItemId"]) &&
+  isMediaType(value["mediaType"]) &&
+  isNullableString(value["originalFilename"]) &&
+  isString(value["uploaderName"]) &&
+  isString(value["strategy"]) &&
+  isNullableString(value["snippet"]) &&
+  isNullableNumber(value["atSeconds"]);
+
 export const isStrategyDescriptor: Guard<StrategyDescriptor> = (
   value,
 ): value is StrategyDescriptor =>
@@ -192,17 +204,21 @@ const eventGuards: { [K in ServerEvent["type"]]: (event: Fields) => boolean } = 
     isString(e["mediaItemId"]) &&
     literal("done", "failed")(e["status"]) &&
     isArrayOfArtifacts(e["artifacts"]) &&
+    isOptionalString(e["message"]) &&
     isOptionalString(e["error"]),
 
   pong: () => true,
 
   error: (e) => isString(e["code"]) && isString(e["message"]),
+  doc: (e) => isString(e["roomId"]) && isString(e["data"]) && isOptionalString(e["from"]),
 };
 
 export function isServerEvent(value: unknown): value is ServerEvent {
   if (!isRecord(value)) return false;
   const type = value["type"];
-  if (!isString(type) || !(type in eventGuards)) return false;
+  // Object.hasOwn, not `in`: `in` also walks the prototype, so a frame typed
+  // "toString" or "__proto__" would find an inherited method and pass.
+  if (!isString(type) || !Object.hasOwn(eventGuards, type)) return false;
   return eventGuards[type as ServerEvent["type"]](value);
 }
 
@@ -211,7 +227,7 @@ export function describeFrame(value: unknown): string {
   if (!isRecord(value)) return `a non-object frame (${typeof value})`;
   const type = value["type"];
   if (!isString(type)) return "a frame with no event type";
-  if (!(type in eventGuards)) return `an unknown event type "${type}"`;
+  if (!Object.hasOwn(eventGuards, type)) return `an unknown event type "${type}"`;
   return `a malformed "${type}" event`;
 }
 
@@ -230,4 +246,5 @@ export const isMetrics = (value: unknown): value is Metrics =>
       isBoolean(q["workersOnline"]),
   ) &&
   isRecord(value["jobs"]) &&
-  isNumber(value["jobEventStreamLength"]);
+  isNumber(value["jobEventStreamLength"]) &&
+  isNumber(value["at"]);

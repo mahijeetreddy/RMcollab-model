@@ -78,3 +78,19 @@ class JobEvent:
         data = prune(asdict(self))
         data["emittedAt"] = int(time.time() * 1000)
         return {"payload": json.dumps(data)}
+
+
+# One strategy a pool can run, published to Redis for the gateway. `queue` is
+# where a job must be sent to reach this pool, which is not always the queue
+# named after the media type: see advertise.serving_queue. snake_case on the
+# wire, like EnhanceTaskPayload, because Python writes it.
+@dataclass(frozen=True)
+class StrategyAdvert:
+    name: str
+    label: str
+    description: str
+    media_type: MediaType
+    is_default: bool
+    available: bool
+    explicit_default: bool
+    queue: str

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import mimetypes
 from pathlib import Path
 from typing import Any
 
@@ -93,7 +94,9 @@ def enhance(self, **kwargs: Any) -> dict[str, Any]:
                     kind=item.kind,
                     label=item.label,
                     path=config.relativize(path),
-                    mimeType=item.mime_type,
+                    # Single-output strategies rarely say what they wrote; the
+                    # extension does, and the client and library both need it.
+                    mimeType=item.mime_type or mimetypes.guess_type(path.name)[0],
                     meta=item.meta,
                 )
             )

@@ -34,7 +34,10 @@ CAPS = vio.Caps(
 )
 
 
-@register(default=True)
+# Not the declared default any more: video's default is comprehension, which the
+# audio pool serves (workers/strategies/audio/comprehend_video.py). This is still
+# what the video pool falls back to on its own, e.g. when the audio pool is down.
+@register
 class ClassicalVideo(BaseEnhancer):
     name = "classical"
     label = "Classical (gamma + CLAHE per frame)"

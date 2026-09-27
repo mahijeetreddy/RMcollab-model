@@ -130,3 +130,36 @@ CREATE INDEX IF NOT EXISTS job_artifacts_job_idx ON job_artifacts(job_id, create
 -- participant record exists.
 ALTER TABLE rooms ADD COLUMN IF NOT EXISTS created_by TEXT
   REFERENCES participants(id) ON DELETE SET NULL;
+
+-- Room library: artifact text copied into the database so it can be searched.
+-- Files stay the source of truth for serving; `body` exists only for search and
+-- snippets, and is never selected into job events or room snapshots.
+ALTER TABLE job_artifacts ADD COLUMN IF NOT EXISTS body TEXT;
+-- The label is weighted above the text, so searching "summary" ranks summaries
+-- first. English stemming makes "queue" match "queues"; transcripts in other
+-- languages still match exact words, just without stemming.
+ALTER TABLE job_artifacts ADD COLUMN IF NOT EXISTS search tsvector
+  GENERATED ALWAYS AS (
+    setweight(to_tsvector('english', coalesce(label, '')), 'A') ||
+    setweight(to_tsvector('english', coalesce(body, '')), 'B')
+  ) STORED;
+CREATE INDEX IF NOT EXISTS job_artifacts_search_idx ON job_artifacts USING GIN (search);
+CREATE INDEX IF NOT EXISTS media_items_room_idx ON media_items(room_id, created_at);
+
+-- Room notes: a Yjs CRDT document per room. Edits append to room_doc_updates
+-- (merged in ~400ms batches), and compaction folds them into room_docs.snapshot.
+-- Rows are opaque binary updates; order does not matter to a CRDT, so seq is
+-- only a compaction watermark, not a replay order.
+CREATE TABLE IF NOT EXISTS room_docs (
+  room_id       TEXT PRIMARY KEY REFERENCES rooms(id) ON DELETE CASCADE,
+  snapshot      BYTEA NOT NULL,
+  compacted_seq BIGINT NOT NULL DEFAULT 0,
+  updated_at    BIGINT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS room_doc_updates (
+  seq        BIGSERIAL PRIMARY KEY,
+  room_id    TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+  data       BYTEA NOT NULL,
+  created_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS room_doc_updates_room_idx ON room_doc_updates(room_id, seq);

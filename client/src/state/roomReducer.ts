@@ -204,6 +204,7 @@ function applyServerEvent(state: RoomState, event: ServerEvent): RoomState {
                 status: event.status,
                 progress: event.status === "done" ? 1 : job.progress,
                 artifacts: event.artifacts.length > 0 ? event.artifacts : job.artifacts,
+                message: event.message ?? job.message,
                 error: event.error ?? (event.status === "failed" ? job.error : null),
                 completedAt: Date.now(),
               }
@@ -211,6 +212,11 @@ function applyServerEvent(state: RoomState, event: ServerEvent): RoomState {
         ),
       };
     }
+
+    case "doc":
+      // Routed to the notes editor before the reducer (useRealtime); the room's
+      // document lives in its CRDT, not in this state.
+      return state;
 
     default: {
       const exhaustive: never = event;

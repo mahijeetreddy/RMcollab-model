@@ -34,7 +34,7 @@ def _quietest_window(buffer: np.ndarray, sample_rate: int) -> np.ndarray:
     return mono[quietest : quietest + window]
 
 
-@register(default=True)
+@register
 class SpectralGate(BaseEnhancer):
     name = "spectral"
     label = "Spectral gate"

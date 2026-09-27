@@ -5,6 +5,7 @@ import type {
   EnhancementJob,
   JobEvent,
   JobStatus,
+  LibraryEntry,
   MediaItem,
   MediaItemWithJob,
   MediaType,
@@ -15,6 +16,7 @@ import type {
   WebhookEndpoint,
   WebhookEventPayload,
 } from "@rmcollab/shared";
+import { LIBRARY_MATCH_END, LIBRARY_MATCH_START } from "@rmcollab/shared";
 import { customAlphabet, nanoid } from "nanoid";
 import { storage } from "../storage/local.js";
 import { pool } from "./pool.js";
@@ -182,11 +184,82 @@ const toArtifact = (row: ArtifactRow): Artifact => ({
   createdAt: Number(row.created_at),
 });
 
+/**
+ * Explicit, not `a.*`: the table also holds each document's full text and its
+ * search vector, and those must not ride along on every job event and snapshot.
+ */
+const ARTIFACT_COLS = `a.id, a.job_id, a.kind, a.label, a.storage_path, a.mime_type,
+   a.size_bytes, a.meta, a.created_at`;
+
 /** Artifacts come back with the job in one round trip rather than an N+1 per job. */
 const artifactsJson = (jobAlias: string): string => `COALESCE((
-       SELECT json_agg(a ORDER BY a.created_at, a.id)
-       FROM job_artifacts a WHERE a.job_id = ${jobAlias}.id
+       SELECT json_agg(x ORDER BY x.created_at, x.id)
+       FROM (SELECT ${ARTIFACT_COLS} FROM job_artifacts a WHERE a.job_id = ${jobAlias}.id) x
      ), '[]'::json) AS artifacts`;
+
+// --- artifact text, for the library ------------------------------------------
+
+/** Enough for a three-hour transcript; tsvector itself tops out near 1MB. */
+const MAX_BODY_BYTES = 512 * 1024;
+
+// Rows written before workers reported a mime type have none, so the file
+// extension is the fallback.
+const isTextual = (kind: string, mimeType: string | null | undefined, path: string): boolean =>
+  kind === "transcript" ||
+  kind === "summary" ||
+  Boolean(mimeType?.startsWith("text/")) ||
+  (!mimeType && /\.(txt|md)$/i.test(path));
+
+/**
+ * NUL is rejected by Postgres text, and the two match markers must never occur
+ * in the source or a snippet could claim a highlight the search did not make.
+ */
+export const cleanBody = (text: string): string => text.replace(/[\u0000\u0002\u0003]/g, "");
+
+async function readBody(
+  kind: string,
+  mimeType: string | null | undefined,
+  path: string,
+): Promise<string | null> {
+  if (!isTextual(kind, mimeType, path)) return null;
+  const text = await storage.readText(path, MAX_BODY_BYTES);
+  if (text === null) console.warn(`[library] could not read ${path} for indexing`);
+  return text === null ? null : cleanBody(text);
+}
+
+/**
+ * Indexes artifacts written before the library existed. Rows that cannot be
+ * read get an empty body, so a missing file is looked for once, not every boot.
+ * Safe to run on every replica at once: each UPDATE only fills a NULL.
+ */
+export async function backfillArtifactBodies(batch = 200): Promise<number> {
+  let filled = 0;
+  for (;;) {
+    const { rows } = await pool.query<{
+      id: string;
+      kind: string;
+      mime_type: string | null;
+      storage_path: string;
+    }>(
+      `SELECT id, kind, mime_type, storage_path FROM job_artifacts
+       WHERE body IS NULL AND (
+         kind IN ('transcript', 'summary') OR mime_type LIKE 'text/%'
+         OR (mime_type IS NULL AND storage_path ~* '\\.(txt|md)$')
+       )
+       LIMIT $1`,
+      [batch],
+    );
+    if (rows.length === 0) return filled;
+    for (const row of rows) {
+      const body = (await readBody(row.kind, row.mime_type, row.storage_path)) ?? "";
+      await pool.query(`UPDATE job_artifacts SET body = $2 WHERE id = $1 AND body IS NULL`, [
+        row.id,
+        body,
+      ]);
+      filled += 1;
+    }
+  }
+}
 
 /** Plain columns, for RETURNING on writes. Artifacts are read back separately. */
 const JOB_COLS_BASE = `id, media_item_id, media_type, strategy, status, progress, message,
@@ -551,9 +624,13 @@ export async function updateJobFromEvent(event: JobEvent): Promise<EnhancementJo
   // The UPDATE is the idempotency gate: a redelivered stream entry finds the job
   // already terminal, returns no row, and never gets here to duplicate artifacts.
   if (event.artifacts?.length) {
+    // Read before inserting, so a document is searchable the moment it exists.
+    const bodies = await Promise.all(
+      event.artifacts.map((a) => readBody(a.kind, a.mimeType, a.path)),
+    );
     const values: unknown[] = [];
     const tuples = event.artifacts.map((artifact, index) => {
-      const base = index * 8;
+      const base = index * 9;
       values.push(
         nanoid(16),
         event.jobId,
@@ -563,12 +640,13 @@ export async function updateJobFromEvent(event: JobEvent): Promise<EnhancementJo
         artifact.mimeType ?? null,
         JSON.stringify(artifact.meta ?? {}),
         now,
+        bodies[index] ?? null,
       );
-      return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}::jsonb, $${base + 8})`;
+      return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6}, $${base + 7}::jsonb, $${base + 8}, $${base + 9})`;
     });
     await pool.query(
       `INSERT INTO job_artifacts
-         (id, job_id, kind, label, storage_path, mime_type, meta, created_at)
+         (id, job_id, kind, label, storage_path, mime_type, meta, created_at, body)
        VALUES ${tuples.join(", ")}`,
       values,
     );
@@ -873,4 +951,126 @@ export async function replayWebhookDelivery(id: string): Promise<WebhookDelivery
   );
   const row = rows[0];
   return row ? toDelivery(row) : null;
+}
+
+// --- library ------------------------------------------------------------------
+
+interface LibraryRow extends ArtifactRow {
+  media_item_id: string;
+  media_type: MediaType;
+  original_filename: string | null;
+  uploader_name: string;
+  strategy: string;
+  snippet: string | null;
+  hit_stamp: string | null;
+}
+
+const LIBRARY_LIMIT = 100;
+const SNIPPET_CHARS = 280;
+
+const HEADLINE_OPTIONS = [
+  `StartSel=${LIBRARY_MATCH_START}`,
+  `StopSel=${LIBRARY_MATCH_END}`,
+  "MaxFragments=2",
+  "MaxWords=22",
+  "MinWords=8",
+  'FragmentDelimiter=" … "',
+].join(", ");
+
+export function stampSeconds(stamp: string | null): number | null {
+  const match = stamp ? /^(\d+):(\d{2}):(\d{2})$/.exec(stamp) : null;
+  if (!match) return null;
+  return Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
+}
+
+const toLibraryEntry = (row: LibraryRow): LibraryEntry => ({
+  artifact: toArtifact(row),
+  mediaItemId: row.media_item_id,
+  mediaType: row.media_type,
+  originalFilename: row.original_filename,
+  uploaderName: row.uploader_name,
+  strategy: row.strategy,
+  snippet: row.snippet,
+  atSeconds: stampSeconds(row.hit_stamp),
+});
+
+const LIBRARY_FROM = `
+  FROM job_artifacts a
+  JOIN enhancement_jobs j ON j.id = a.job_id
+  JOIN media_items m ON m.id = j.media_item_id
+  JOIN participants p ON p.id = m.uploader_id`;
+
+const LIBRARY_SELECT = `${ARTIFACT_COLS}, m.id AS media_item_id, m.media_type,
+  m.original_filename, p.display_name AS uploader_name, j.strategy`;
+
+/**
+ * Every document a room has produced, newest first - or, with a query, the ones
+ * matching it, by rank. The query goes through websearch_to_tsquery, so people
+ * can type what they would into a search engine ("queues -redis", "fan out" in
+ * quotes) and malformed input degrades to a plain search, never a syntax error.
+ */
+export async function listLibrary(roomId: string, query: string | null): Promise<LibraryEntry[]> {
+  if (!query) {
+    const { rows } = await pool.query<LibraryRow>(
+      `SELECT ${LIBRARY_SELECT}, left(a.body, ${SNIPPET_CHARS}) AS snippet, NULL AS hit_stamp
+       ${LIBRARY_FROM}
+       WHERE m.room_id = $1
+       ORDER BY a.created_at DESC, a.id
+       LIMIT ${LIBRARY_LIMIT}`,
+      [roomId],
+    );
+    return rows.map(toLibraryEntry);
+  }
+
+  // For a transcript, the first line that matches on its own gives a time to
+  // jump to. A query whose terms are spread over several lines has no such
+  // line; the result is still returned, just without a time.
+  const { rows } = await pool.query<LibraryRow>(
+    `WITH q AS (SELECT websearch_to_tsquery('english', $2) AS query)
+     SELECT ${LIBRARY_SELECT},
+            ts_headline('english', coalesce(nullif(a.body, ''), a.label), q.query, $3) AS snippet,
+            hit.stamp AS hit_stamp
+     ${LIBRARY_FROM}
+     CROSS JOIN q
+     LEFT JOIN LATERAL (
+       SELECT substring(l.line FROM '^\\[(\\d+:\\d\\d:\\d\\d)\\]') AS stamp
+       FROM regexp_split_to_table(a.body, E'\\n') WITH ORDINALITY AS l(line, n)
+       WHERE a.kind = 'transcript' AND to_tsvector('english', l.line) @@ q.query
+       ORDER BY l.n
+       LIMIT 1
+     ) hit ON TRUE
+     WHERE m.room_id = $1 AND a.search @@ q.query
+     ORDER BY ts_rank_cd(a.search, q.query) DESC, a.created_at DESC
+     LIMIT ${LIBRARY_LIMIT}`,
+    [roomId, query, HEADLINE_OPTIONS],
+  );
+  return rows.map(toLibraryEntry);
+}
+
+// --- notes writer --------------------------------------------------------------
+
+export async function getMediaItem(mediaItemId: string): Promise<MediaItem | null> {
+  const { rows } = await pool.query<MediaItemRow>(
+    `SELECT m.*, p.display_name AS uploader_name
+     FROM media_items m JOIN participants p ON p.id = m.uploader_id
+     WHERE m.id = $1`,
+    [mediaItemId],
+  );
+  return rows[0] ? toMediaItem(rows[0]) : null;
+}
+
+export interface ArtifactText {
+  kind: ArtifactKind;
+  mimeType: string | null;
+  body: string | null;
+  meta: Record<string, unknown>;
+}
+
+/** What a job produced, with the text the library indexed, for the notes writer. */
+export async function getArtifactTexts(jobId: string): Promise<ArtifactText[]> {
+  const { rows } = await pool.query<{ kind: ArtifactKind; mime_type: string | null; body: string | null; meta: Record<string, unknown> | null }>(
+    `SELECT kind, mime_type, body, meta FROM job_artifacts WHERE job_id = $1 ORDER BY created_at, id`,
+    [jobId],
+  );
+  return rows.map((r) => ({ kind: r.kind, mimeType: r.mime_type, body: r.body || null, meta: r.meta ?? {} }));
 }

@@ -1,7 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { JobStatus, MediaItem, MediaItemWithJob, MediaType } from "@rmcollab/shared";
 import { resolveFileUrl } from "../../api/client";
 import { formatBytes, formatTime, MEDIA_TYPE_LABELS } from "../../lib/format";
+import { DocumentPanel } from "./DocumentPanel";
+import { TextCompare } from "./TextCompare";
+import type { DocumentFocus } from "./focus";
 import { useTextContent } from "./useTextContent";
 
 const STATUS_LABEL: Record<JobStatus, string> = {
@@ -65,7 +68,12 @@ function MediaPane({ label, url, mediaType, item, active, placeholder, altPrefix
   );
 }
 
-export function MediaJobCard({ mediaItem, job }: MediaItemWithJob) {
+interface CardProps extends MediaItemWithJob {
+  /** Set when this card is the target of a library "open". */
+  focus?: DocumentFocus | null;
+}
+
+export function MediaJobCard({ mediaItem, job, focus = null }: CardProps) {
   const status: JobStatus = job?.status ?? "queued";
   const progress = Math.min(1, Math.max(0, job?.progress ?? 0));
   const percent = Math.round(progress * 100);
@@ -80,6 +88,25 @@ export function MediaJobCard({ mediaItem, job }: MediaItemWithJob) {
   const indeterminate = status === "processing" && progress === 0;
   const running = status === "queued" || status === "processing";
   const label = mediaItem.originalFilename ?? `${MEDIA_TYPE_LABELS[mediaItem.mediaType]} upload`;
+  const baseName = (mediaItem.originalFilename ?? mediaItem.mediaType).replace(/\.[^.]+$/, "") || "document";
+
+  // A transcript's timestamps drive the original recording, and the recording's
+  // position highlights the line being spoken. Only null until playback starts,
+  // so an untouched transcript has no highlighted line.
+  const playable = mediaItem.mediaType === "audio" || mediaItem.mediaType === "video";
+  const playerRef = useRef<HTMLMediaElement | null>(null);
+  const [playhead, setPlayhead] = useState<number | null>(null);
+  const onTimeUpdate = useCallback(() => {
+    const player = playerRef.current;
+    if (player && (player.currentTime > 0 || !player.paused)) setPlayhead(player.currentTime);
+  }, []);
+  const seek = useCallback((seconds: number) => {
+    const player = playerRef.current;
+    if (!player) return;
+    player.currentTime = seconds;
+    setPlayhead(seconds);
+    void player.play().catch(() => undefined);
+  }, []);
 
   // One-shot celebration when a job lands on DONE in front of the viewer.
   const previousStatus = useRef<JobStatus>(status);
@@ -94,18 +121,40 @@ export function MediaJobCard({ mediaItem, job }: MediaItemWithJob) {
     previousStatus.current = status;
   }, [status]);
 
+  // Bring the card into view and move keyboard focus to it, so a screen reader
+  // user lands where a sighted user is looking.
+  const cardRef = useRef<HTMLElement | null>(null);
+  const [flash, setFlash] = useState(false);
+  useEffect(() => {
+    if (!focus) return;
+    const card = cardRef.current;
+    // An explicit behaviour overrides the reduced-motion CSS, so ask directly.
+    const still = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    card?.scrollIntoView({ block: "start", behavior: still ? "auto" : "smooth" });
+    card?.focus({ preventScroll: true });
+    setFlash(true);
+    const timer = window.setTimeout(() => setFlash(false), 1600);
+    return () => window.clearTimeout(timer);
+  }, [focus]);
+
   const cardClass = [
     "job-card",
     running ? "is-running" : "",
     status === "done" ? "is-done" : "",
     status === "failed" ? "is-failed" : "",
     justFinished ? "just-finished" : "",
+    flash ? "is-focused" : "",
   ]
     .filter(Boolean)
     .join(" ");
 
   return (
-    <article className={cardClass} aria-label={`${label}, ${STATUS_LABEL[status]}`}>
+    <article
+      ref={cardRef}
+      className={cardClass}
+      aria-label={`${label}, ${STATUS_LABEL[status]}`}
+      tabIndex={-1}
+    >
       <header className="job-head">
         <span className="job-uploader">{mediaItem.uploaderName}</span>
         <span className="badge">{MEDIA_TYPE_LABELS[mediaItem.mediaType]}</span>
@@ -164,7 +213,14 @@ export function MediaJobCard({ mediaItem, job }: MediaItemWithJob) {
 
       {/* A comprehension job replaces the original rather than improving it, so
           the side-by-side is only shown when the job actually produced one. */}
-      {(enhanced || documents.length === 0) && (
+      {mediaItem.mediaType === "text" && status === "done" && originalUrl && resultUrl ? (
+        <TextCompare
+          originalUrl={originalUrl}
+          resultUrl={resultUrl}
+          name={mediaItem.originalFilename ?? "text upload"}
+          strategy={job?.strategy ?? null}
+        />
+      ) : (enhanced || documents.length === 0) && (
         <div className="compare">
           <MediaPane
             label="Original"
@@ -187,18 +243,51 @@ export function MediaJobCard({ mediaItem, job }: MediaItemWithJob) {
         </div>
       )}
 
+      {/* An image read into notes: the photo stays beside what was read from it. */}
+      {documents.length > 0 && !enhanced && mediaItem.mediaType === "image" && originalUrl && (
+        <div className="doc-source doc-source-image">
+          <img src={originalUrl} alt={`Original upload: ${label}`} loading="lazy" />
+        </div>
+      )}
+
+      {documents.length > 0 && !enhanced && playable && originalUrl && (
+        <div className="doc-source">
+          {mediaItem.mediaType === "video" ? (
+            <video
+              ref={(node) => {
+                playerRef.current = node;
+              }}
+              src={originalUrl}
+              controls
+              preload="metadata"
+              aria-label={`Original recording: ${label}`}
+              onTimeUpdate={onTimeUpdate}
+              onPause={onTimeUpdate}
+            />
+          ) : (
+            <audio
+              ref={(node) => {
+                playerRef.current = node;
+              }}
+              src={originalUrl}
+              controls
+              preload="metadata"
+              aria-label={`Original recording: ${label}`}
+              onTimeUpdate={onTimeUpdate}
+              onPause={onTimeUpdate}
+            />
+          )}
+        </div>
+      )}
+
       {documents.length > 0 && (
-        <ul className="artifact-list">
-          {documents.map((artifact) => (
-            <li key={artifact.id}>
-              <span className="artifact-kind">{artifact.kind}</span>
-              <span className="artifact-label">{artifact.label}</span>
-              <a href={resolveFileUrl(artifact.url) ?? "#"} target="_blank" rel="noreferrer">
-                Open
-              </a>
-            </li>
-          ))}
-        </ul>
+        <DocumentPanel
+          documents={documents}
+          baseName={baseName}
+          playhead={playhead}
+          onSeek={playable && !enhanced && originalUrl ? seek : undefined}
+          focus={focus}
+        />
       )}
     </article>
   );

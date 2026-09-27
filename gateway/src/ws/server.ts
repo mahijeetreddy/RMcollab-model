@@ -1,5 +1,6 @@
 import type { Server } from "node:http";
 import type { ClientEvent, ServerEvent } from "@rmcollab/shared";
+import { nanoid } from "nanoid";
 import { WebSocket, WebSocketServer } from "ws";
 import { z } from "zod";
 import { config } from "../config.js";
@@ -16,6 +17,7 @@ import {
   upsertParticipant,
   resolveRoomAccess,
 } from "../db/repositories.js";
+import { docHub } from "../docs/hub.js";
 import { pubsub } from "./pubsub.js";
 import { roomRegistry, sessionRegistry } from "./registry.js";
 
@@ -41,10 +43,19 @@ const clientEventSchema: z.ZodType<ClientEvent> = z.discriminatedUnion("type", [
     roomId: z.string().trim().min(1).max(64),
     isTyping: z.boolean(),
   }),
+  z.object({
+    type: z.literal("doc"),
+    roomId: z.string().trim().min(1).max(64),
+    // A single edit is small; the cap bounds a full-document sync of a large
+    // room, and stops one frame from ballooning a replica's memory.
+    data: z.string().min(1).max(4_000_000),
+  }),
   z.object({ type: z.literal("ping") }),
 ]);
 
 interface ConnectionState {
+  /** Unique per socket: how the doc hub avoids echoing an edit to its author. */
+  connId: string;
   participantId: string | null;
   sessionId: string | null;
   displayName: string | null;
@@ -67,8 +78,12 @@ async function leaveRoom(socket: WebSocket, state: ConnectionState): Promise<voi
   const { roomId, participantId } = state;
   if (!roomId) return;
   state.roomId = null;
+  docHub.leave(roomId, state.connId);
   if (roomRegistry.remove(roomId, socket)) {
     await pubsub.unsubscribeRoom(roomId).catch(() => undefined);
+    // No longer receiving the room's traffic, so the replica's copy of its
+    // notes would go stale; the hub saves it and lets it go.
+    await docHub.drop(roomId).catch((err: unknown) => console.error("[docs] drop failed", err));
   }
   if (participantId) {
     await pubsub.publishToRoom(roomId, { type: "participant_left", roomId, participantId });
@@ -218,6 +233,15 @@ async function handleEvent(
       return handleChatMessage(socket, state, event);
     case "typing":
       return handleTyping(state, event);
+    case "doc":
+      // Only for the room this socket was admitted to - the same check that
+      // guards chat and uploads guards the notes. A stale frame from just
+      // before a room switch is dropped, not an error.
+      if (state.roomId !== event.roomId) return;
+      return docHub.receive(event.roomId, {
+        id: state.connId,
+        send: (data) => send(socket, { type: "doc", roomId: event.roomId, data }),
+      }, event.data);
     case "ping":
       send(socket, { type: "pong" });
       return;
@@ -244,6 +268,16 @@ export function createWebSocketServer(httpServer: Server): WebSocketServer {
 
   pubsub.setHandlers({
     onRoomEvent(roomId, event) {
+      if (event.type === "doc") {
+        // The hub applies it to this replica's copy and forwards it to local
+        // editors other than its author, with `from` stripped.
+        try {
+          docHub.relay(roomId, event.data, event.from ?? "");
+        } catch (err) {
+          console.error("[docs] relay failed", err);
+        }
+        return;
+      }
       const payload = JSON.stringify(event);
       for (const socket of roomRegistry.members(roomId)) {
         if (socket.readyState === WebSocket.OPEN) socket.send(payload);
@@ -259,6 +293,7 @@ export function createWebSocketServer(httpServer: Server): WebSocketServer {
 
   wss.on("connection", (socket) => {
     const state: ConnectionState = {
+      connId: nanoid(12),
       participantId: null,
       sessionId: null,
       displayName: null,

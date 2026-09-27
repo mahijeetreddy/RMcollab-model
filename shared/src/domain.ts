@@ -89,6 +89,30 @@ export interface EnhancementJob {
   completedAt: number | null;
 }
 
+/**
+ * One searchable document in a room's library: an artifact plus enough about
+ * the upload it came from to say what it is without loading the room feed.
+ */
+export interface LibraryEntry {
+  artifact: Artifact;
+  mediaItemId: string;
+  mediaType: MediaType;
+  originalFilename: string | null;
+  uploaderName: string;
+  strategy: string;
+  /**
+   * A passage of the document's text. For a search, the matched terms are
+   * wrapped in LIBRARY_MATCH_START / LIBRARY_MATCH_END - control characters
+   * rather than markup, so the client never has to trust HTML from the server.
+   */
+  snippet: string | null;
+  /** For a transcript hit, where in the recording the first match is spoken. */
+  atSeconds: number | null;
+}
+
+export const LIBRARY_MATCH_START = "\u0002";
+export const LIBRARY_MATCH_END = "\u0003";
+
 export interface MediaItemWithJob {
   mediaItem: MediaItem;
   job: EnhancementJob | null;

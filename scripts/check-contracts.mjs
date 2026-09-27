@@ -14,12 +14,14 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const TS_FILE = "shared/src/events.ts";
-const PY_FILE = "workers/common/contracts.py";
+const DEFAULT_TS_FILE = "shared/src/events.ts";
+const DEFAULT_PY_FILE = "workers/common/contracts.py";
 
 const CONTRACTS = [
   { name: "JobEvent", casing: "camel" },
   { name: "EnhanceTaskPayload", casing: "snake" },
+  // Worker -> gateway capability adverts, which jobs are now routed by.
+  { name: "StrategyAdvert", casing: "snake", ts: "gateway/src/queue/routing.ts" },
 ];
 
 // A type is only comparable if both sides map onto the same canonical name.
@@ -136,6 +138,8 @@ function canonical(map, type, lang) {
 function compare(contract, ts, py) {
   const problems = [];
   const { name, casing } = contract;
+  const TS_FILE = contract.ts ?? DEFAULT_TS_FILE;
+  const PY_FILE = contract.py ?? DEFAULT_PY_FILE;
   const convention = CASING[casing];
 
   for (const [side, parsed, file] of [
@@ -177,13 +181,12 @@ function compare(contract, ts, py) {
   return problems;
 }
 
-const tsSrc = read(TS_FILE);
-const pySrc = read(PY_FILE);
-
 let failures = 0;
 for (const contract of CONTRACTS) {
-  const ts = parseTsInterface(tsSrc, contract.name);
-  const py = parsePyDataclass(pySrc, contract.name);
+  const TS_FILE = contract.ts ?? DEFAULT_TS_FILE;
+  const PY_FILE = contract.py ?? DEFAULT_PY_FILE;
+  const ts = parseTsInterface(read(TS_FILE), contract.name);
+  const py = parsePyDataclass(read(PY_FILE), contract.name);
 
   if (!ts) fail(`interface ${contract.name} not found in ${TS_FILE}`);
   if (!py) fail(`dataclass ${contract.name} not found in ${PY_FILE}`);

@@ -24,17 +24,36 @@ function isPrivateIPv4(address: string): boolean {
   return false;
 }
 
+/**
+ * The IPv4 address carried in the low 32 bits of an IPv4-mapped (::ffff:0:0/96),
+ * IPv4-compatible (::/96) or NAT64 (64:ff9b::/96) address, or null.
+ *
+ * Both spellings must be decoded. Node's URL parser rewrites the dotted form to
+ * hex - `[::ffff:169.254.169.254]` arrives here as `::ffff:a9fe:a9fe` - so a check
+ * that only understands the dotted form lets the cloud metadata address through.
+ */
+function embeddedIPv4(lower: string): string | null {
+  const match = lower.match(
+    /^(?:::ffff:|::|64:ff9b::)(?:(\d+\.\d+\.\d+\.\d+)|([0-9a-f]{1,4}):([0-9a-f]{1,4}))$/,
+  );
+  if (!match) return null;
+  if (match[1]) return match[1];
+  const high = parseInt(match[2]!, 16);
+  const low = parseInt(match[3]!, 16);
+  return `${high >> 8}.${high & 0xff}.${low >> 8}.${low & 0xff}`;
+}
+
 function isPrivateIPv6(address: string): boolean {
   const lower = address.toLowerCase().split("%")[0]!;
   if (lower === "::" || lower === "::1") return true;
+  const v4 = embeddedIPv4(lower);
+  if (v4) return isPrivateIPv4(v4);
   if (lower.startsWith("fc") || lower.startsWith("fd")) return true;
   if (lower.startsWith("fe8") || lower.startsWith("fe9") || lower.startsWith("fea") ||
       lower.startsWith("feb")) {
     return true;
   }
   if (lower.startsWith("ff")) return true;
-  const mapped = lower.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
-  if (mapped) return isPrivateIPv4(mapped[1]!);
   return false;
 }
 

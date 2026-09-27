@@ -15,7 +15,15 @@
     "build:shared": "npm run build -w shared",
     "check:contracts": "node scripts/check-contracts.mjs",
     "scale": "docker compose -f infra/docker-compose.yml up -d --scale gateway=2 --scale text-worker=3",
-    "loadtest": "node scripts/loadtest.mjs"
+    "loadtest": "node scripts/loadtest.mjs",
+    "test": "npm run test:gateway && npm run test:client && npm run check:contracts",
+    "test:gateway": "npm test -w gateway",
+    "test:client": "npm test -w client",
+    "test:workers": "python -m pytest",
+    "typecheck": "npm run build -w shared && tsc --noEmit -p shared/tsconfig.json && tsc --noEmit -p gateway/tsconfig.json && tsc --noEmit -p legacy/tsconfig.json && tsc --noEmit -p client/tsconfig.json",
+    "test:e2e": "npm --prefix e2e test",
+    "latency": "node scripts/latency.mjs",
+    "check:notes-replicas": "docker cp scripts/notes-cross-replica.mjs rmcollab-gateway-1:/app/gateway/notes-cross-replica.mjs && docker exec -w /app/gateway rmcollab-gateway-1 node notes-cross-replica.mjs"
   },
   "engines": {
     "node": ">=20"

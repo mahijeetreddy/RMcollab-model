@@ -109,3 +109,28 @@ On startup each worker publishes the strategies it can run to
 (`workers/common/advertise.py`). The gateway mirrors those keys into `GET /api/strategies`,
 so the picker shows the pools that are actually online — start a worker and its strategies
 appear; stop it and they expire.
+
+## Measured: denoising before transcription hurts
+
+The comprehension pipeline was designed to denoise audio before Whisper. That was
+measured before being made the default, and it is off, because it makes transcripts
+worse. Synthetic speech (espeak-ng, 67 words) mixed with pink noise, transcribed by
+Whisper `small` int8, scored by word error rate against the known text:
+
+| SNR | raw | spectral | DeepFilterNet |
+|---|---|---|---|
+| 20 dB | 1.5% | 1.5% | 1.5% |
+| 10 dB | 3.0% | 3.0% | 3.0% |
+| 5 dB | 1.5% | 3.0% | 9.0% |
+| 0 dB | 9.0% | 7.5% | 13.4% |
+| -5 dB | 20.9% | 26.9% | 67.2% |
+
+Spectral gating helped once, hurt twice (+1.2 points mean). DeepFilterNet never
+helped and hurt three times (+11.6 points mean) - despite measuring as the *better*
+denoiser by SI-SNR (+16.7 dB vs +9.6). SNR scores what a listener hears; a
+recogniser needs spectral detail that an aggressive enhancer removes, and Whisper
+is already trained on noisy audio. The two are different objectives.
+
+Caveat: synthetic speech and synthetic noise. Real recordings may differ, which is
+why `denoise` remains available as an opt-in param rather than being deleted. It is
+worth re-running this with real classroom audio before changing the default.

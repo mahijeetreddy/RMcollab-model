@@ -1,0 +1,16 @@
+{
+  "name": "rmcollab-e2e",
+  "private": true,
+  "type": "module",
+  "description": "End-to-end tests against a running stack. Deliberately NOT an npm workspace: Playwright and its browsers must never be installed into the production images, which run `npm install --workspaces`.",
+  "scripts": {
+    "test": "playwright test",
+    "install-browsers": "playwright install chromium"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0",
+    "@types/node": "^26.6.2",
+    "@types/ws": "^8.5.12",
+    "ws": "^8.18.0"
+  }
+}

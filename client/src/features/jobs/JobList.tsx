@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import type { JobStatus, MediaItemWithJob } from "@rmcollab/shared";
+import type { DocumentFocus } from "./focus";
 import { MediaJobCard } from "./MediaJobCard";
 
 interface Props {
   media: MediaItemWithJob[];
+  focus?: DocumentFocus | null;
 }
 
 const TRANSITION_WORDS: Record<JobStatus, string> = {
@@ -18,7 +20,7 @@ function describe(entry: MediaItemWithJob, status: JobStatus): string {
   return `${name} ${TRANSITION_WORDS[status]}`;
 }
 
-export function JobList({ media }: Props) {
+export function JobList({ media, focus = null }: Props) {
   // Only status transitions are announced. Progress ticks arrive several times
   // a second and would make the live region useless.
   const seenRef = useRef<Map<string, JobStatus> | null>(null);
@@ -48,7 +50,12 @@ export function JobList({ media }: Props) {
       ) : (
         <div className="job-list">
           {media.map((entry) => (
-            <MediaJobCard key={entry.mediaItem.id} mediaItem={entry.mediaItem} job={entry.job} />
+            <MediaJobCard
+              key={entry.mediaItem.id}
+              mediaItem={entry.mediaItem}
+              job={entry.job}
+              focus={focus?.mediaItemId === entry.mediaItem.id ? focus : null}
+            />
           ))}
         </div>
       )}

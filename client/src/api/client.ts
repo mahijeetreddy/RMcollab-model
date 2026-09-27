@@ -1,4 +1,5 @@
 import type {
+  LibraryEntry,
   MediaItemWithJob,
   MediaType,
   Room,
@@ -8,6 +9,7 @@ import type {
 import type { Metrics } from "../features/cluster/ClusterPanel";
 import {
   arrayOf,
+  isLibraryEntry,
   isMediaItemWithJob,
   isRoom,
   isSession,
@@ -158,6 +160,23 @@ export const api = {
       `/api/rooms/${encodeURIComponent(roomId)}/code?participantId=${encodeURIComponent(participantId)}`,
       "code",
       isString,
+    );
+  },
+
+  /** A room's documents, newest first, or ranked matches when `query` is set. */
+  library(
+    roomId: string,
+    participantId: string,
+    query: string,
+    signal?: AbortSignal,
+  ): Promise<LibraryEntry[]> {
+    const params = new URLSearchParams({ participantId });
+    if (query.trim()) params.set("q", query.trim());
+    return requestIn(
+      `/api/rooms/${encodeURIComponent(roomId)}/library?${params}`,
+      "entries",
+      arrayOf(isLibraryEntry),
+      signal ? { signal } : undefined,
     );
   },
 

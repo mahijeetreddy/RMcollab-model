@@ -15,10 +15,11 @@ function client(): Redis {
   return producer;
 }
 
-export async function enqueueEnhanceTask(payload: EnhanceTaskPayload): Promise<string> {
+/** `queue` comes from capability routing; the media type's queue is the fallback. */
+export async function enqueueEnhanceTask(payload: EnhanceTaskPayload, queue?: string): Promise<string> {
   return sendTask(client(), {
     taskName: TASK_ENHANCE,
-    queue: QUEUES[payload.media_type],
+    queue: queue ?? QUEUES[payload.media_type],
     kwargs: payload as unknown as Record<string, unknown>,
   });
 }

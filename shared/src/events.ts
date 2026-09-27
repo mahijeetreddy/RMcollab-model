@@ -21,6 +21,10 @@ export type ClientEvent =
   | { type: "join_room"; roomId: string; code?: string }
   | { type: "chat_message"; roomId: string; body: string }
   | { type: "typing"; roomId: string; isTyping: boolean }
+  // The room's shared notes. `data` is a base64 y-protocols message (sync or
+  // awareness), carried on the same socket as everything else so the room's
+  // access check guards the document too. See gateway/src/docs/roomDocs.ts.
+  | { type: "doc"; roomId: string; data: string }
   | { type: "ping" };
 
 // ---------------------------------------------------------------------------
@@ -67,8 +71,14 @@ export type ServerEvent =
       status: Extract<JobStatus, "done" | "failed">;
       /** Everything the job produced. Empty on failure. */
       artifacts: Artifact[];
+      /** The worker's closing summary; replaces the last progress message. */
+      message?: string;
       error?: string;
     }
+  // Shared-notes traffic, same encoding as the client event. `from` names the
+  // sending connection while the frame crosses Redis, so each replica can skip
+  // echoing it back to its author; it is stripped before reaching a browser.
+  | { type: "doc"; roomId: string; data: string; from?: string }
   | { type: "pong" }
   | { type: "error"; code: string; message: string };
 

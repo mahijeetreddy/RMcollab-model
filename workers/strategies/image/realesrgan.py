@@ -325,7 +325,9 @@ def _write(path: Path, bgr: Any) -> None:
         raise RuntimeError(f"OpenCV could not encode {path.suffix or 'the output'}")
 
 
-@register(default=True)
+# The fallback, not the default: image's default is reading it into notes
+# (notes.py), which needs a vision model. Without one, this is what runs.
+@register(fallback=True)
 class RealEsrgan(BaseEnhancer):
     name = "realesrgan"
     label = "Real-ESRGAN x4"

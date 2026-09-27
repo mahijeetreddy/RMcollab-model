@@ -14,6 +14,7 @@ import {
   insertMediaItem,
   updateJobFromEvent,
   hasRoomAccess,} from "../../db/repositories.js";
+import { notesWriter } from "../../notes/index.js";
 import { enqueueEnhanceTask } from "../../queue/enqueue.js";
 import {
   enhancedPath,
@@ -24,7 +25,7 @@ import {
 import { pubsub } from "../../ws/pubsub.js";
 import { asyncHandler } from "../asyncHandler.js";
 import { routeParam } from "../params.js";
-import { DEFAULT_STRATEGY, isKnownStrategy } from "./strategies.js";
+import { DEFAULT_STRATEGY, isKnownStrategy, routeJob } from "./strategies.js";
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -186,6 +187,9 @@ mediaRouter.post(
     }
 
     const job = await insertJob({ mediaItemId, mediaType, strategy });
+    // The upload's section in the room notes, saved before the job is queued,
+    // so whichever replica handles its completion is guaranteed to find it.
+    await notesWriter.uploaded(mediaItem);
 
     const payload: EnhanceTaskPayload = {
       job_id: job.id,
@@ -200,7 +204,7 @@ mediaRouter.post(
     };
 
     try {
-      await enqueueEnhanceTask(payload);
+      await enqueueEnhanceTask(payload, routeJob(payload.media_type, payload.strategy));
     } catch (err) {
       const message = err instanceof Error ? err.message : "enqueue failed";
       const failed = await updateJobFromEvent({
@@ -215,6 +219,7 @@ mediaRouter.post(
         error: message,
         emittedAt: Date.now(),
       });
+      if (failed) await notesWriter.finished(mediaItem, failed, []);
       res.status(502).json({ error: "enqueue_failed", message, mediaItem, job: failed ?? job });
       return;
     }

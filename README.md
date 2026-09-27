@@ -6,7 +6,7 @@ action items - produced by GPU worker pools and streamed to everyone in the room
 
 Rooms are shared workspaces rather than calls: chat, presence, and a growing set of artifacts the
 group can return to. Media also runs through swappable enhancement pipelines (GAN upscaling,
-learned speech denoising), which double as pre-processing for comprehension.
+learned speech denoising) as standalone tools.
 
 ---
 
@@ -77,6 +77,13 @@ process: Celery workers are long-lived, so the load cost is paid once rather tha
 cost is a few hundred MB of the shared card held by the audio pool - the same trade the video
 pool makes for Real-ESRGAN.
 
+**Denoising before transcription was measured, and it hurts.** The original plan had
+enhancement feed comprehension - denoise first so the transcript is cleaner. Scored by word error
+rate across noise levels, spectral gating made transcripts slightly worse and DeepFilterNet much
+worse (21% -> 67% WER in the noisiest case), despite DeepFilterNet being the better denoiser by
+SI-SNR. A recogniser and a listener want different things. So denoising is off by default and
+stays an opt-in; the full table is in [`workers/README.md`](workers/README.md).
+
 Segment timings are written inline in the transcript file rather than into artifact `meta`,
 because `meta` rides along on every WebSocket job event and room snapshot, and a long recording
 has hundreds of segments.
@@ -88,6 +95,69 @@ environment variables. With nothing configured the LLM strategies advertise as u
 text falls back to the offline `rulebased` cleanup, so the product still works with no key at
 all. Long transcripts are summarised in parts and merged, so a full lecture does not need to fit
 in one request.
+
+**Documents, not before/after.** A comprehension job has nothing to compare against, so its card
+shows the original recording above a tabbed Summary / Transcript view. Transcript timestamps
+seek the recording and the line being spoken is highlighted as it plays; search narrows the
+transcript to matching lines. The summary is model output and therefore untrusted, so it is
+parsed into a small Markdown tree that React renders as elements - there is no route from summary
+text to HTML, which the tests check with a `<script>` payload rather than trusting a sanitiser.
+
+**Images become notes.** A photo of a whiteboard, slide or page goes to a vision model and
+comes back as Markdown - headings, points, diagrams described in a sentence, and an "Action items"
+list only if to-dos are actually written. It lands as a `summary` artifact, so the room's notes,
+the library and search take it without a new kind. On a generated whiteboard (headings, a diagram,
+two red TODOs, a figure) Gemini transcribed every line, kept `XAUTOCLAIM` and `91.7` exactly,
+described the diagram as data flowing from gateway to Redis to workers, and turned the TODOs into
+action items. Three decisions:
+
+- **A separate `vision` task profile.** The text model is often not a vision model (Groq's gpt-oss
+  is not), so images go wherever `LLM_VISION_*` points while text stays where it is. Vision counts
+  as available only with a vision model named explicitly, or a Claude key: sending an image to a
+  text model fails the job instead of degrading.
+- **Downscaled before sending.** Vision models read at around 1,600 px; a 12-megapixel phone photo
+  sent whole costs upload time and tokens for detail the model throws away.
+- **The default, with a declared fallback.** Reading into notes is the image default, and the
+  registry gained `@register(fallback=True)`: without a vision model the GAN upscaler runs, rather
+  than whichever module happened to import first.
+
+On a free tier the vision provider may keep what it is sent, which the strategy's description says
+and the example `.env` repeats: this is for study material, not photos of people.
+
+**Long recordings get chapters.** Past eight minutes, the summary opens with a table of contents -
+`[HH:MM:SS] Topic`, from the transcript's own timestamps. The model finds chapters within each part
+of a long transcript; code assembles them. Left to the model, the merge put 10 of 12 chapters in
+the first 5 minutes of a 54-minute session (it kept the earliest when trimming) and moved them
+below the summary. Code now sorts them, folds repeated neighbours, spreads the twelve across the
+whole recording and puts them first - and every timestamp is checked to exist in the source.
+
+**Edits you can see.** A careful rewrite of already-clean prose looks unchanged side by side, so a
+text result marks its edits inline - removals struck through, additions highlighted, with a count
+of edits and words changed. Paragraphs are aligned first and only changed stretches are diffed word
+by word, so a long document stays fast; a size cap swaps an oversized stretch for a whole
+replacement rather than freezing the tab. Look-alike characters are treated as equal: a model was
+caught swapping ordinary hyphens for non-breaking ones, which a naive diff reports as edits no one
+can see.
+
+**A room is worth coming back to.** The Library view lists every document a room has produced
+and searches them with Postgres full-text search - a generated, weighted `tsvector` over each
+artifact's text with a GIN index, so "pelican" finds "pelicans" and `"fan out" -redis` works as
+typed. No search service: at this size the database already does it. Details:
+
+- **Text is copied in once, when a job lands.** The gateway reads each text artifact from shared
+  storage as it records the job, so a document is searchable the moment it exists; older rows
+  are backfilled at boot. The file stays the source of truth for serving.
+- **The text never leaves the database by accident.** Job events and room snapshots select
+  artifact columns explicitly, so a three-hour transcript does not ride along on every WebSocket
+  frame. An end-to-end test asserts it.
+- **Highlights are not HTML.** `ts_headline` marks matches with two control characters that are
+  stripped from the text on the way in, so the client renders highlights without ever parsing
+  markup from the server.
+- **A transcript hit knows when it was said.** The first transcript line matching the query gives
+  a timestamp; opening the hit switches to the feed and brings that line into view, without
+  starting playback.
+- **Private rooms stay private.** The library is guarded like uploading: session membership is
+  not enough to read a locked room's documents.
 
 ## Swappable strategies
 
@@ -113,12 +183,36 @@ mirrors it, so the picker reflects the pools that are genuinely online rather th
 into the code. An unavailable strategy stays visible but greyed out, never wins default
 resolution, and if you request one anyway the job reports which strategy ran instead and why.
 
+**Jobs are routed by capability, not by media type.** Each advert carries the queue that reaches
+the pool able to run it, and the gateway sends a job there. That is what lets a lecture *video* be
+transcribed by the *audio* pool: comprehending a video is audio work, and the audio pool is where
+Whisper is already loaded. The class lives in the audio package with `media_type = "video"`, so
+the audio pool registers and advertises it and the video pool never loads it. The alternative -
+transcribing in the video pool - would put a second Whisper on the same 4GB card and queue every
+lecture behind upscales in a pool that runs one job at a time.
+
+Three rules keep that honest, each added because something broke without it:
+
+- **A pool advertises only what its own packages define.** Video upscaling imports the image
+  Real-ESRGAN module, which registers the image strategies in the video pool as a side effect.
+  Advertised, they overwrote the image pool's adverts - last writer wins - and image jobs could be
+  routed to the video queue. Ownership is by defining package, not by what happens to be loaded.
+- **A pool imports only the packages it serves.** Resolving a video job in the audio pool would
+  otherwise import the whole video package, torch and all, into it.
+- **One default per media type, merged at the gateway: declared beats fallen-back.** Each pool
+  knows only its own registry, so the video pool alone reports `classical` as its default while
+  the audio pool declares `comprehend`. The gateway prefers declared-and-available, then
+  available, so if the audio pool is down, video degrades to upscaling rather than failing.
+
+The advert shape is checked across both languages by `npm run check:contracts`, like the job
+payload and job events: routing now depends on it.
+
 | Media | Strategies |
 |---|---|
 | text | `rulebased` (deterministic offline cleanup - no key, no network) / `rewrite`, `summarise` (any configured language model) |
-| image | `realesrgan` (GAN 4x super-resolution) / `classical` (gamma + CLAHE, sub-second) |
-| audio | `transcribe` (Whisper speech-to-text) / `spectral` (noise gating) / `deepfilternet` (learned speech enhancement) |
-| video | `classical` (per-frame, ~6ms/frame) / `realesrgan` (per-frame GAN, opt-in and frame-budgeted) |
+| image | **`notes`** (whiteboard, slide or page read into notes by a vision model) / `realesrgan` (GAN 4x super-resolution; the fallback when no vision model is configured) / `classical` (gamma + CLAHE, sub-second) |
+| audio | **`comprehend`** (transcript + summary) / `transcribe` (Whisper speech-to-text) / `spectral` (noise gating) / `deepfilternet` (learned speech enhancement) |
+| video | **`comprehend`** (transcript + summary from the soundtrack; runs in the audio pool) / `classical` (per-frame, ~6ms/frame) / `realesrgan` (per-frame GAN, opt-in and frame-budgeted) |
 
 Measured on the same card: Real-ESRGAN upscales 1280x720 to 5120x2880 in 58s at 756MB peak
 VRAM - it runs **tiled**, because a naive full-frame pass OOMs a 4GB card. Audio denoising
@@ -127,6 +221,74 @@ at well under real time.
 
 Model weights download on first use into a named volume and are verified by size and SHA-256,
 so a truncated download fails loudly instead of producing garbage.
+
+## Room notes: one shared document, edited live
+
+Each room has a notes page that everyone in it edits at once, laid out like a word processor -
+a page on a canvas, a formatting toolbar, a document outline - with each person's cursor and name
+visible. It is where the room's understanding accumulates: **every upload writes into it.** A file
+gets its own section the moment it is accepted, and the section fills with the analysis when the
+job finishes - a summary's headings and points, its action items as a real checklist, a
+transcript's opening lines, a rewrite's text - live, for everyone in the room.
+
+**Concurrent editing is a CRDT, not last-write-wins.** Two people typing into the same sentence
+at the same moment must both keep their words; saving whole-document snapshots would drop one.
+The document is a [Yjs](https://github.com/yjs/yjs) CRDT with a TipTap editor bound to it, so
+concurrent edits merge deterministically on every client without a central lock.
+
+How it runs across a horizontally scaled gateway:
+
+- **One transport.** Sync and presence travel as y-protocols messages (the y-websocket wire
+  format) inside the existing JSON socket, so the room access check that guards chat and uploads
+  guards the document too - a locked room's notes are exactly as private as the room.
+- **Every replica holds a copy while it has editors, and Redis carries the edits.** A replica
+  applies a local edit, publishes it, and - following the same publish-then-deliver rule as the
+  rest of the room - every replica applies what arrives and forwards it to its own editors, minus
+  the author. No ordering or de-duplication is needed: CRDT merges are commutative and idempotent.
+- **A replica's copy lives exactly as long as its Redis subscription.** Kept any longer, it would
+  miss edits made elsewhere and hand the next joiner a stale document. When a replica loads a
+  room it also re-reads storage once after a batch window, catching an edit another replica had
+  published but not yet saved.
+- **Keystrokes are batched.** Updates merge into one row per 400 ms per room instead of one per
+  key: a whole cross-replica editing session measured at two rows. The window cannot lose work:
+  every editor holds the full document, and the sync handshake on reconnect sends the server
+  exactly what it is missing - an edit survives even a replica dying before it saved.
+- **Compaction happens in the database.** Batches fold into a snapshot under a transaction-scoped
+  advisory lock, from what is stored rather than any replica's memory. It deletes exactly the rows
+  it merged, never "everything up to seq N": a sequence number is taken at insert but visible only
+  at commit, so another replica's batch can hold a lower number and still be unmerged.
+- **Presence is ephemeral, and answered.** Cursors are never stored. When a newcomer appears,
+  existing editors re-announce immediately rather than on the 15 s renewal, so someone joining
+  through another replica sees everyone at once. Colours from other browsers are untrusted and
+  only a plain `#rrggbb` is ever put in a style.
+- **Undo is yours alone.** History is the CRDT's per-user undo manager: undo takes back your own
+  typing, never a collaborator's.
+
+**The AI is a collaborator that only adds.** The gateway writes into the same CRDT the editors
+do, as one more peer. Rules it keeps:
+
+- **A placeholder is saved before the job is queued.** A job's completion can be handled by a
+  different replica, which - if nobody in the room is connected to it - loads the notes from
+  storage. Had the placeholder still been in a save batch, that replica would not find it and the
+  upload would get two sections. So this one write is saved synchronously; everything else batches.
+- **An untouched placeholder is replaced; anything a person typed stays,** with the results added
+  after it. **A section a person deleted stays deleted:** the writer records which uploads it has
+  placed a section for, in the same document, so "missing" can be told apart - never written,
+  versus removed on purpose.
+- **Filled exactly once, cluster-wide.** Completion is driven by the job-event consumer group, and
+  only the event that moves a job to done or failed gets past the idempotent update - a redelivery
+  finds the job already terminal.
+- **Progress is not written into the document.** It ticks several times a second; each tick would
+  be a CRDT update and a stored row. The section reads live progress from room state instead,
+  which every client already has.
+- **The document schema is a contract.** The editor's collaboration binding does not show an
+  element its schema rejects - it deletes it. So the section builder lives in `shared`, used by the
+  gateway, and a client test loads everything it can produce into the real editor schema and fails
+  if anything would be dropped.
+
+The editor is split out of the main bundle and loaded on first use (66 KB vs 168 KB gzipped).
+`npm run check:notes-replicas` runs two editors against two gateway replicas directly, bypassing
+the load balancer so they are guaranteed to be on different replicas.
 
 ## Access and security
 
@@ -202,6 +364,78 @@ The image, audio and video pools reserve an NVIDIA GPU. On a machine without one
 `deploy.resources` block from `x-ml-worker` in `infra/docker-compose.yml` - the reservation is a
 hard requirement for the container to start, though every strategy itself falls back to CPU.
 
+## Choosing a model
+
+Free models were compared on a 54-minute study-group transcript with twelve facts planted at the
+start, middle and end - dates, a room, a grade weight, a measured figure, three action items with
+owners, two open questions - plus two traps: an idea the group rejects and a number someone
+retracts. Each summary was scored for facts kept, then read for anything stated wrongly.
+
+| Model (free tier) | Setup | Facts kept | Errors found by reading | Time |
+|---|---|---|---|---|
+| **Gemini 3.5 Flash** | whole transcript, one request | **12, 12, 12** | none | 19-30s |
+| Gemini 3 Flash (preview) | whole transcript, one request | 11, 11, 11 | inverted a fact once (said the system *uses* the outbox pattern it lacks) | 8-20s |
+| Groq gpt-oss-120b | 5 parts, merged | 9 | the same inversion; contradicted itself on delivery guarantees | 122s |
+| Groq gpt-oss-120b | whole transcript | - | rejected: the free tier caps a single request at 8K tokens | - |
+| Gemini 3.8 / 3.7 Flash | whole transcript | - | unavailable: 503 through every retry, on two attempts | - |
+
+What the measurements changed:
+
+- **Merging loses facts.** The same Groq model kept 8 of 12 with the original prompts and 9 with
+  prompts that require every date, number and owner to survive the merge. The single-request
+  runs kept them all. So `LLM_CHUNK_CHARS` is a per-provider setting: as large as the provider's
+  context and quota allow.
+- **Free tiers throttle and shed load routinely.** Groq answered 429 nine times in one summary;
+  Gemini answered 503 for minutes at a time. Calls retry on 429 and 5xx with jittered exponential
+  backoff and honour `Retry-After`, and a wait longer than a minute - a daily cap - fails fast
+  instead of holding a worker.
+- **Reasoning models can spend the whole budget thinking.** A capped Gemini call came back with
+  no text and `finish_reason: length`; that now fails with an error naming `LLM_MAX_TOKENS`.
+- **Keyword scoring is not enough.** One model scored 11/12 while stating a fact backwards, which
+  only reading caught.
+
+The default is Gemini 3.5 Flash, with a caveat that decides where it is appropriate: Google may use
+free-tier prompts for training and human reviewers may read them, and its terms ask for no personal
+data. That is fine for a demo on your own recordings and wrong for anyone else's. Groq contractually
+does not train on inputs, so it is the choice when privacy outranks summary quality. Either is a
+change to `.env` only; `.env.example` has both with their measured settings.
+
+These are single-transcript results from September 2026 on synthetic speech-like text, and free
+model line-ups change month to month.
+
+### Latency: where a rewrite's time went
+
+A rewrite is the interaction where someone sits waiting, so it was measured end to end - upload to
+`job_complete` on the room's WebSocket - with `npm run latency` (12 sequential jobs, worker freshly
+restarted, Groq gpt-oss-120b):
+
+| | first job | p50 | worst |
+|---|---|---|---|
+| Before | 1,833 ms | 798 ms | 2,194 ms |
+| After | 662 ms | 737 ms | 1,192 ms |
+| After, following 45 s idle | 680 ms | 514 ms | 680 ms |
+
+The finding that mattered: **opening the first connection to the provider took 2.8-3.2 s per worker
+process** (SDK import, DNS, TCP, TLS). Celery runs four pool processes, so each one's first job paid
+it - the "sometimes 4 seconds" rewrite. Three decisions followed:
+
+- **Warm at process start, off the boot path.** Each pool child imports the SDK and opens its
+  connection in a background thread as it starts (`llm.warm`), so no user's job pays for it. It is
+  a thread because Celery kills a child that is slow to report ready, and a provider that is down
+  at boot must not take workers with it.
+- **One client per endpoint per process, kept alive.** A client used to be built per call - a
+  fresh handshake every time - and httpx drops idle connections after 5 s anyway. Clients are now
+  cached per process and hold connections for 120 s, so a rewrite after a quiet minute reuses
+  one. Caches are cleared in each forked child so a socket never crosses a fork.
+- **Task profiles.** Tasks want different things: a rewrite is short and interactive, a summary long
+  and read closely. `LLM_<TASK>_<SETTING>` overrides any setting for one task - model, reasoning
+  effort, output cap, even the provider - falling back to the shared `LLM_*`. Rewrites run at
+  `reasoning_effort=low`: about 30 output tokens instead of 115-190, and roughly half the call time.
+
+What is left is mostly outside the process: Groq's own server timing showed 0.3 s queued against
+0.09 s of compute on the free tier, and the pipeline (upload, Redis, stream, WebSocket) adds
+100-200 ms.
+
 ## Scaling out
 
 The gateway holds no room state of its own - Postgres is the source of truth and Redis pub/sub
@@ -232,6 +466,32 @@ counts by status, and the replica that answered. The **Cluster** panel in the ap
 it - the "gateway replicas seen" counter climbing to 2 is the horizontal-scale claim made
 visible.
 
+## Testing
+
+Three layers, from fastest to most real:
+
+| Layer | Command | Needs | Covers |
+|---|---|---|---|
+| Unit (TS) | `npm test` | Node 20 | gateway (Celery wire format, SSRF guard, signing, storage, params), client (reducer, event guards), cross-language contract check |
+| Unit (Python) | `npm run test:workers` | `pip install -r workers/requirements-dev.txt` | strategy registry, LLM provider selection, event throttling, comprehension pipeline |
+| End to end | `npm run test:e2e` | the stack running (`docker compose ... up`) | real browsers and sockets against the live stack: fan-out, locked rooms, signed URLs, GPU enhancement, transcription, co-edited notes |
+| Cross-replica notes | `npm run check:notes-replicas` | `--scale gateway=2` | two editors pinned to different gateway replicas: edits, concurrent edits, late joiners and presence all crossing Redis |
+
+`npm run typecheck` type-checks every TypeScript package. Python tests marked `ml` need the GPU
+image's dependencies and skip themselves elsewhere, so the suite runs anywhere. CI
+(`.github/workflows/ci.yml`) runs both unit layers on every push.
+
+The end-to-end suite is a standalone package, not a workspace, so Playwright never ends up in a
+production image. First run:
+
+```bash
+cd e2e && npm install && npm run install-browsers
+```
+
+The unit tests found two real bugs when they were written: an SSRF bypass, where
+`http://[::ffff:169.254.169.254]/` reached the cloud metadata address because Node rewrites
+IPv4-mapped IPv6 into hex form, and an event guard that accepted `toString` as a frame type.
+
 ## Roadmap
 
 **Foundation** - complete.
@@ -253,9 +513,14 @@ visible.
 | 1 | Artifact model - one job, many named outputs | done |
 | 2 | Transcription - faster-whisper, cached model | done |
 | 3 | Summarisation - provider-agnostic LLM, chunk-and-reduce | done |
-| 4 | Audio comprehension - transcribe -> summarise in one job, denoise as pre-processing | next |
-| 5 | Client - transcript and summary views instead of before/after panes | planned |
-| 6 | Room library - browse and search everything a room has accumulated | planned |
+| 4 | Audio comprehension - transcribe -> summarise in one job | done |
+| 5 | Client - transcript and summary views instead of before/after panes | done |
+| 6 | Room library - browse and search everything a room has accumulated | done |
+| 7 | Video comprehension - lecture video to transcript + summary, via capability routing | done |
+| 8 | Room notes - a CRDT document the whole room edits live, across gateway replicas | done |
+| 9 | Uploads write into the notes - a section per upload, live placeholders, provenance | done |
+| 10 | Images read into notes (vision model), chapters for long recordings, rooms open on the notes | done |
+| 11 | Ask the room - questions answered from everything in its notes and transcripts, with sources | next |
 
 Not planned: live audio/video calling (a deliberate scope cut - rooms are workspaces, not calls),
 and user accounts (groups return by session code; "my rooms across devices" needs real identity).
