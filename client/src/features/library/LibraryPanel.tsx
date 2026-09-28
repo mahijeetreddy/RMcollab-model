@@ -35,7 +35,9 @@ function formatDate(timestamp: number): string {
 
 function Snippet({ entry }: { entry: LibraryEntry }) {
   if (!entry.snippet) return null;
-  const parts = parseSnippet(entry.snippet, entry.artifact.kind === "transcript");
+  const kind = entry.artifact.kind;
+  // Summaries (and image notes) are Markdown; show their words, not their syntax.
+  const parts = parseSnippet(entry.snippet, kind === "transcript", kind === "summary");
   if (parts.length === 0) return null;
   return (
     <p className="library-snippet">

@@ -1,12 +1,53 @@
 # RMcollab
 
-Collaborative rooms for study groups and seminar teams. Drop a lecture recording into a room and
-the whole group gets a **timestamped transcript and a summary** back - key points, decisions,
-action items - produced by GPU worker pools and streamed to everyone in the room in real time.
+Collaborative rooms for study groups and seminar teams. Each room has **shared notes that everyone
+edits live**, and whatever the group drops in writes itself into them: a lecture recording becomes a
+timestamped transcript and a summary, a whiteboard photo becomes typed notes, and action items
+arrive as checklists - produced by GPU worker pools and streamed to everyone in the room in real
+time.
 
-Rooms are shared workspaces rather than calls: chat, presence, and a growing set of artifacts the
-group can return to. Media also runs through swappable enhancement pipelines (GAN upscaling,
+Rooms are shared workspaces rather than calls: live notes, chat, presence, and a searchable library
+the group can return to. Media also runs through swappable enhancement pipelines (GAN upscaling,
 learned speech denoising) as standalone tools.
+
+## A quick tour
+
+**The room's notes.** A shared document laid out like a word processor. Each upload gets its own
+section - here a summarised meeting, a lecture recording and a whiteboard photo - filled in by the
+workers as the analysis finishes. Bob's cursor is live; the outline on the left follows the
+headings and uploads.
+
+![Room notes: a shared document with sections written by uploads, a collaborator's live cursor, and a document outline](docs/screenshots/notes.png)
+
+**A whiteboard, read into notes** - seen by a second person, in dark mode. The vision model
+transcribes what is written, describes the diagram, keeps exact details (`XAUTOCLAIM`, `91.7`), and
+turns the written TODOs into a checklist the room can tick off.
+
+![A whiteboard photo turned into structured notes with an action-item checklist, in dark mode](docs/screenshots/notes-dark-whiteboard.png)
+
+**Transcripts tied to the recording.** Every line is timestamped; clicking a stamp plays the
+recording from there, and the line being spoken is highlighted. Summary and transcript sit in tabs,
+with copy and download.
+
+![A lecture recording's timestamped transcript under its audio player](docs/screenshots/transcript.png)
+
+**Edits you can see.** A rewrite marks what it changed - removals struck through, additions
+highlighted - with a count of edits, so even a light touch-up is visible.
+
+![A rewritten text with its edits marked inline next to the original](docs/screenshots/rewrite-diff.png)
+
+**A library that searches everything the room produced** - summaries, rewrites, image notes and
+transcripts. A transcript hit says when in the recording the word is spoken, and opening it jumps
+to that line.
+
+![Library search for "gateway" matching a summary, a rewrite, image notes and a transcript at 0:03](docs/screenshots/library.png)
+
+**No accounts.** Start a session, share its six-character code, and split into breakout rooms -
+lockable with a room code.
+
+![The landing page, with start-a-session and join-a-session forms](docs/screenshots/landing.png)
+
+<sub>Screenshots come from a live stack and are regenerated with `npm run screenshots`.</sub>
 
 ---
 
@@ -66,11 +107,11 @@ the group rejoins.
 
 Measured on the target GPU (RTX 3050, 4GB), Whisper `small` at int8:
 
-| | |
-|---|---|
-| Transcription speed | RTF 0.10-0.12 warm (~10x faster than real time) |
-| First job in a worker | RTF ~2.9 - dominated by model load |
-| 30 minute lecture | ~3 minutes |
+|                       |                                                 |
+| --------------------- | ----------------------------------------------- |
+| Transcription speed   | RTF 0.10-0.12 warm (~10x faster than real time) |
+| First job in a worker | RTF ~2.9 - dominated by model load              |
+| 30 minute lecture     | ~3 minutes                                      |
 
 The gap between those first two rows is why the model is cached for the life of the worker
 process: Celery workers are long-lived, so the load cost is paid once rather than per job. The
@@ -174,18 +215,32 @@ class MyEnhancer(BaseEnhancer):
         ...
 ```
 
-It then appears automatically in the client's strategy picker. See
+It then appears automatically under "More options" when adding media. See
 [`workers/README.md`](workers/README.md).
+
+**People are not shown the strategy list first.** Adding media is a drop zone that takes several
+files (or pasted text) at once. The client identifies each item and measures it - word count,
+image size, recording length - then proposes the action that suits it in plain language, with the
+reason: a long text gets "Summarise", a short one "Polish the writing", a small image "Sharpen &
+upscale", a 42-minute recording "Transcribe & summarise - about 5 min". Nothing is sent until the
+person clicks; every other strategy stays one click away. The recommendation follows the live
+adverts below, so without a vision model an image falls back to upscaling rather than proposing
+something that cannot run (`client/src/lib/detect.ts`, `client/src/lib/recommend.ts`).
+
+The browser's guess is a convenience, not a trust boundary. The gateway reads each upload's magic
+bytes (`gateway/src/http/sniff.ts`): content it does not recognise is refused with 415, and a file
+whose bytes disagree with its declared type - an `.mp4` that is really audio - is routed by what it
+actually is.
 
 Strategies declare whether they can actually run (`available()` - an API key, model weights, a
 GPU). Workers advertise their live registry into Redis under a TTL heartbeat and the gateway
-mirrors it, so the picker reflects the pools that are genuinely online rather than a list baked
+mirrors it, so what is offered reflects the pools that are genuinely online rather than a list baked
 into the code. An unavailable strategy stays visible but greyed out, never wins default
 resolution, and if you request one anyway the job reports which strategy ran instead and why.
 
 **Jobs are routed by capability, not by media type.** Each advert carries the queue that reaches
-the pool able to run it, and the gateway sends a job there. That is what lets a lecture *video* be
-transcribed by the *audio* pool: comprehending a video is audio work, and the audio pool is where
+the pool able to run it, and the gateway sends a job there. That is what lets a lecture _video_ be
+transcribed by the _audio_ pool: comprehending a video is audio work, and the audio pool is where
 Whisper is already loaded. The class lives in the audio package with `media_type = "video"`, so
 the audio pool registers and advertises it and the video pool never loads it. The alternative -
 transcribing in the video pool - would put a second Whisper on the same 4GB card and queue every
@@ -207,12 +262,12 @@ Three rules keep that honest, each added because something broke without it:
 The advert shape is checked across both languages by `npm run check:contracts`, like the job
 payload and job events: routing now depends on it.
 
-| Media | Strategies |
-|---|---|
-| text | `rulebased` (deterministic offline cleanup - no key, no network) / `rewrite`, `summarise` (any configured language model) |
+| Media | Strategies                                                                                                                                                                                                    |
+| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| text  | `rulebased` (deterministic offline cleanup - no key, no network) / `rewrite`, `summarise` (any configured language model)                                                                                     |
 | image | **`notes`** (whiteboard, slide or page read into notes by a vision model) / `realesrgan` (GAN 4x super-resolution; the fallback when no vision model is configured) / `classical` (gamma + CLAHE, sub-second) |
-| audio | **`comprehend`** (transcript + summary) / `transcribe` (Whisper speech-to-text) / `spectral` (noise gating) / `deepfilternet` (learned speech enhancement) |
-| video | **`comprehend`** (transcript + summary from the soundtrack; runs in the audio pool) / `classical` (per-frame, ~6ms/frame) / `realesrgan` (per-frame GAN, opt-in and frame-budgeted) |
+| audio | **`comprehend`** (transcript + summary) / `transcribe` (Whisper speech-to-text) / `spectral` (noise gating) / `deepfilternet` (learned speech enhancement)                                                    |
+| video | **`comprehend`** (transcript + summary from the soundtrack; runs in the audio pool) / `classical` (per-frame, ~6ms/frame) / `realesrgan` (per-frame GAN, opt-in and frame-budgeted)                           |
 
 Measured on the same card: Real-ESRGAN upscales 1280x720 to 5120x2880 in 58s at 756MB peak
 VRAM - it runs **tiled**, because a naive full-frame pass OOMs a 4GB card. Audio denoising
@@ -335,16 +390,16 @@ a receiver returning 400 will return 400 again.
 
 ## Stack
 
-| Layer | Choice |
-|---|---|
-| Client | React 18, TypeScript, Vite |
-| Edge | nginx - load balancing across gateway replicas, WebSocket upgrade |
-| Gateway | Node 20, Express, `ws`, ioredis, `pg` |
-| Workers | Python 3.11, Celery, Redis broker |
-| Models | faster-whisper, Real-ESRGAN (RRDBNet), DeepFilterNet; LLM via Anthropic or any OpenAI-compatible API |
-| State | Postgres 16 |
-| Bus | Redis - pub/sub (fan-out), Streams (job events), lists (task queues) |
-| Orchestration | Docker Compose, NVIDIA GPU passthrough |
+| Layer         | Choice                                                                                               |
+| ------------- | ---------------------------------------------------------------------------------------------------- |
+| Client        | React 18, TypeScript, Vite                                                                           |
+| Edge          | nginx - load balancing across gateway replicas, WebSocket upgrade                                    |
+| Gateway       | Node 20, Express, `ws`, ioredis, `pg`                                                                |
+| Workers       | Python 3.11, Celery, Redis broker                                                                    |
+| Models        | faster-whisper, Real-ESRGAN (RRDBNet), DeepFilterNet; LLM via Anthropic or any OpenAI-compatible API |
+| State         | Postgres 16                                                                                          |
+| Bus           | Redis - pub/sub (fan-out), Streams (job events), lists (task queues)                                 |
+| Orchestration | Docker Compose, NVIDIA GPU passthrough                                                               |
 
 ## Running it
 
@@ -371,13 +426,13 @@ start, middle and end - dates, a room, a grade weight, a measured figure, three 
 owners, two open questions - plus two traps: an idea the group rejects and a number someone
 retracts. Each summary was scored for facts kept, then read for anything stated wrongly.
 
-| Model (free tier) | Setup | Facts kept | Errors found by reading | Time |
-|---|---|---|---|---|
-| **Gemini 3.5 Flash** | whole transcript, one request | **12, 12, 12** | none | 19-30s |
-| Gemini 3 Flash (preview) | whole transcript, one request | 11, 11, 11 | inverted a fact once (said the system *uses* the outbox pattern it lacks) | 8-20s |
-| Groq gpt-oss-120b | 5 parts, merged | 9 | the same inversion; contradicted itself on delivery guarantees | 122s |
-| Groq gpt-oss-120b | whole transcript | - | rejected: the free tier caps a single request at 8K tokens | - |
-| Gemini 3.8 / 3.7 Flash | whole transcript | - | unavailable: 503 through every retry, on two attempts | - |
+| Model (free tier)        | Setup                         | Facts kept     | Errors found by reading                                                   | Time   |
+| ------------------------ | ----------------------------- | -------------- | ------------------------------------------------------------------------- | ------ |
+| **Gemini 3.5 Flash**     | whole transcript, one request | **12, 12, 12** | none                                                                      | 19-30s |
+| Gemini 3 Flash (preview) | whole transcript, one request | 11, 11, 11     | inverted a fact once (said the system _uses_ the outbox pattern it lacks) | 8-20s  |
+| Groq gpt-oss-120b        | 5 parts, merged               | 9              | the same inversion; contradicted itself on delivery guarantees            | 122s   |
+| Groq gpt-oss-120b        | whole transcript              | -              | rejected: the free tier caps a single request at 8K tokens                | -      |
+| Gemini 3.8 / 3.7 Flash   | whole transcript              | -              | unavailable: 503 through every retry, on two attempts                     | -      |
 
 What the measurements changed:
 
@@ -409,11 +464,11 @@ A rewrite is the interaction where someone sits waiting, so it was measured end 
 `job_complete` on the room's WebSocket - with `npm run latency` (12 sequential jobs, worker freshly
 restarted, Groq gpt-oss-120b):
 
-| | first job | p50 | worst |
-|---|---|---|---|
-| Before | 1,833 ms | 798 ms | 2,194 ms |
-| After | 662 ms | 737 ms | 1,192 ms |
-| After, following 45 s idle | 680 ms | 514 ms | 680 ms |
+|                            | first job | p50    | worst    |
+| -------------------------- | --------- | ------ | -------- |
+| Before                     | 1,833 ms  | 798 ms | 2,194 ms |
+| After                      | 662 ms    | 737 ms | 1,192 ms |
+| After, following 45 s idle | 680 ms    | 514 ms | 680 ms   |
 
 The finding that mattered: **opening the first connection to the provider took 2.8-3.2 s per worker
 process** (SDK import, DNS, TCP, TLS). Celery runs four pool processes, so each one's first job paid
@@ -451,12 +506,12 @@ npm run loadtest     # 60 jobs at concurrency 10; args: [jobs] [concurrency] [ba
 
 Measured on the dev box with 2 gateways and 3 text workers:
 
-| | |
-|---|---|
+|                    |                                  |
+| ------------------ | -------------------------------- |
 | Enqueue throughput | 91.7 jobs/s (400 jobs, 0 failed) |
-| Enqueue latency | p50 457ms, p95 634ms |
-| Queue drain | 400 jobs in 6.3s |
-| LB distribution | 6/6 across 2 replicas |
+| Enqueue latency    | p50 457ms, p95 634ms             |
+| Queue drain        | 400 jobs in 6.3s                 |
+| LB distribution    | 6/6 across 2 replicas            |
 
 Cross-replica behaviour is verified, not assumed: with sockets pinned to different gateways,
 chat, presence, typing indicators and job progress all arrive on both.
@@ -470,12 +525,12 @@ visible.
 
 Three layers, from fastest to most real:
 
-| Layer | Command | Needs | Covers |
-|---|---|---|---|
-| Unit (TS) | `npm test` | Node 20 | gateway (Celery wire format, SSRF guard, signing, storage, params), client (reducer, event guards), cross-language contract check |
-| Unit (Python) | `npm run test:workers` | `pip install -r workers/requirements-dev.txt` | strategy registry, LLM provider selection, event throttling, comprehension pipeline |
-| End to end | `npm run test:e2e` | the stack running (`docker compose ... up`) | real browsers and sockets against the live stack: fan-out, locked rooms, signed URLs, GPU enhancement, transcription, co-edited notes |
-| Cross-replica notes | `npm run check:notes-replicas` | `--scale gateway=2` | two editors pinned to different gateway replicas: edits, concurrent edits, late joiners and presence all crossing Redis |
+| Layer               | Command                        | Needs                                         | Covers                                                                                                                                |
+| ------------------- | ------------------------------ | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| Unit (TS)           | `npm test`                     | Node 20                                       | gateway (Celery wire format, SSRF guard, signing, storage, params), client (reducer, event guards), cross-language contract check     |
+| Unit (Python)       | `npm run test:workers`         | `pip install -r workers/requirements-dev.txt` | strategy registry, LLM provider selection, event throttling, comprehension pipeline                                                   |
+| End to end          | `npm run test:e2e`             | the stack running (`docker compose ... up`)   | real browsers and sockets against the live stack: fan-out, locked rooms, signed URLs, GPU enhancement, transcription, co-edited notes |
+| Cross-replica notes | `npm run check:notes-replicas` | `--scale gateway=2`                           | two editors pinned to different gateway replicas: edits, concurrent edits, late joiners and presence all crossing Redis               |
 
 `npm run typecheck` type-checks every TypeScript package. Python tests marked `ml` need the GPU
 image's dependencies and skip themselves elsewhere, so the suite runs anywhere. CI
@@ -496,33 +551,31 @@ IPv4-mapped IPv6 into hex form, and an event guard that accepted `toString` as a
 
 **Foundation** - complete.
 
-| | Scope | Status |
-|---|---|---|
-| 1 | Distributed skeleton - rooms, chat, presence, uploads, job pipeline | done |
-| 2 | Strategy framework + text strategies | done |
-| 3 | Webhooks - HMAC signing, retries/backoff, delivery log, replay | done |
-| 4 | Image enhancement - Real-ESRGAN (tiled) + classical baseline | done |
-| 5 | Audio enhancement - spectral gating, DeepFilterNet | done |
-| 6 | Video enhancement - per-frame pipeline, ffmpeg remux, fit-to-budget | done |
-| 7 | Scale-out + observability - load balancer, metrics, load test | done |
+|     | Scope                                                               | Status |
+| --- | ------------------------------------------------------------------- | ------ |
+| 1   | Distributed skeleton - rooms, chat, presence, uploads, job pipeline | done   |
+| 2   | Strategy framework + text strategies                                | done   |
+| 3   | Webhooks - HMAC signing, retries/backoff, delivery log, replay      | done   |
+| 4   | Image enhancement - Real-ESRGAN (tiled) + classical baseline        | done   |
+| 5   | Audio enhancement - spectral gating, DeepFilterNet                  | done   |
+| 6   | Video enhancement - per-frame pipeline, ffmpeg remux, fit-to-budget | done   |
+| 7   | Scale-out + observability - load balancer, metrics, load test       | done   |
 
 **Comprehension** - in progress.
 
-| | Scope | Status |
-|---|---|---|
-| 1 | Artifact model - one job, many named outputs | done |
-| 2 | Transcription - faster-whisper, cached model | done |
-| 3 | Summarisation - provider-agnostic LLM, chunk-and-reduce | done |
-| 4 | Audio comprehension - transcribe -> summarise in one job | done |
-| 5 | Client - transcript and summary views instead of before/after panes | done |
-| 6 | Room library - browse and search everything a room has accumulated | done |
-| 7 | Video comprehension - lecture video to transcript + summary, via capability routing | done |
-| 8 | Room notes - a CRDT document the whole room edits live, across gateway replicas | done |
-| 9 | Uploads write into the notes - a section per upload, live placeholders, provenance | done |
-| 10 | Images read into notes (vision model), chapters for long recordings, rooms open on the notes | done |
-| 11 | Ask the room - questions answered from everything in its notes and transcripts, with sources | next |
+|     | Scope                                                                                        | Status |
+| --- | -------------------------------------------------------------------------------------------- | ------ |
+| 1   | Artifact model - one job, many named outputs                                                 | done   |
+| 2   | Transcription - faster-whisper, cached model                                                 | done   |
+| 3   | Summarisation - provider-agnostic LLM, chunk-and-reduce                                      | done   |
+| 4   | Audio comprehension - transcribe -> summarise in one job                                     | done   |
+| 5   | Client - transcript and summary views instead of before/after panes                          | done   |
+| 6   | Room library - browse and search everything a room has accumulated                           | done   |
+| 7   | Video comprehension - lecture video to transcript + summary, via capability routing          | done   |
+| 8   | Room notes - a CRDT document the whole room edits live, across gateway replicas              | done   |
+| 9   | Uploads write into the notes - a section per upload, live placeholders, provenance           | done   |
+| 10  | Images read into notes (vision model), chapters for long recordings, rooms open on the notes | done   |
+| 11  | Ask the room - questions answered from everything in its notes and transcripts, with sources | next   |
 
 Not planned: live audio/video calling (a deliberate scope cut - rooms are workspaces, not calls),
 and user accounts (groups return by session code; "my rooms across devices" needs real identity).
-
-The original prototype this replaces is preserved under [`legacy/`](legacy/).

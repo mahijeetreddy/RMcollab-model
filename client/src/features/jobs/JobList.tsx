@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import type { JobStatus, MediaItemWithJob } from "@rmcollab/shared";
 import type { DocumentFocus } from "./focus";
 import { MediaJobCard } from "./MediaJobCard";
+import { EmptyState } from "../EmptyState";
+import { docIcons } from "../notes/icons";
 
 interface Props {
   media: MediaItemWithJob[];
@@ -46,7 +48,10 @@ export function JobList({ media, focus = null }: Props) {
       </p>
 
       {media.length === 0 ? (
-        <p className="empty">Nothing uploaded to this room yet.</p>
+        <EmptyState icon={docIcons.cloud} title="Nothing uploaded to this room yet">
+          Add a recording, a whiteboard photo or some notes above. Everyone in the room sees each one here as it is
+          processed.
+        </EmptyState>
       ) : (
         <div className="job-list">
           {media.map((entry) => (

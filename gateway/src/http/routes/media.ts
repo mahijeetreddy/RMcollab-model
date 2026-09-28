@@ -25,6 +25,7 @@ import {
 import { pubsub } from "../../ws/pubsub.js";
 import { asyncHandler } from "../asyncHandler.js";
 import { routeParam } from "../params.js";
+import { resolveMediaType, sniffMedia } from "../sniff.js";
 import { DEFAULT_STRATEGY, isKnownStrategy, routeJob } from "./strategies.js";
 
 const upload = multer({
@@ -122,21 +123,35 @@ mediaRouter.post(
     }
 
     const file = req.file;
-    const mediaType =
+    let mediaType: MediaType | null =
       parsed.data.mediaType ?? inferMediaType(file?.mimetype) ?? (text != null ? "text" : null);
-    if (!mediaType) {
-      res.status(400).json({ error: "unsupported_media", message: "Could not determine mediaType." });
-      return;
-    }
 
     let buffer: Buffer;
     let originalFilename: string | null;
     let mimeType: string | null;
+    // Set when the bytes contradict the claimed type: the extension then comes
+    // from the content, not from a filename that was wrong.
+    let sniffedExt: string | null = null;
 
     if (file) {
+      // The file's own bytes decide which pool gets it, not the browser's label.
+      const sniffed = sniffMedia(file.buffer);
+      if (!sniffed) {
+        res.status(415).json({
+          error: "unsupported_media",
+          message: "That file is not text, an image, a recording or a video that can be read.",
+        });
+        return;
+      }
+      const resolved = resolveMediaType(sniffed, mediaType);
+      mediaType = resolved.mediaType;
       buffer = file.buffer;
       originalFilename = file.originalname || null;
-      mimeType = file.mimetype || null;
+      mimeType = resolved.overridden ? sniffed.mime : file.mimetype || sniffed.mime;
+      if (resolved.overridden) sniffedExt = sniffed.ext;
+    } else if (!mediaType) {
+      res.status(400).json({ error: "unsupported_media", message: "Could not determine mediaType." });
+      return;
     } else if (mediaType === "text" && text && text.trim().length > 0) {
       buffer = Buffer.from(text, "utf8");
       originalFilename = null;
@@ -165,7 +180,7 @@ mediaRouter.post(
         : DEFAULT_STRATEGY;
 
     const mediaItemId = nanoid(16);
-    const ext = inferExtension(mediaType, originalFilename ?? undefined, mimeType ?? undefined);
+    const ext = sniffedExt ?? inferExtension(mediaType, originalFilename ?? undefined, mimeType ?? undefined);
     const inputPath = originalPath(room.id, mediaItemId, ext);
     const outputPath = enhancedPath(room.id, mediaItemId, ext);
 

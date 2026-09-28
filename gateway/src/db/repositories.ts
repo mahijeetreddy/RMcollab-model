@@ -976,6 +976,10 @@ const HEADLINE_OPTIONS = [
   "MinWords=8",
   'FragmentDelimiter=" … "',
 ].join(", ");
+// Fragment mode trims to the covering words, which for a document shorter than
+// a snippet leaves the match alone ("cat" out of "The cat sat on the mat").
+// A document that fits is shown whole, with its matches marked.
+const HEADLINE_WHOLE = [`StartSel=${LIBRARY_MATCH_START}`, `StopSel=${LIBRARY_MATCH_END}`, "HighlightAll=true"].join(", ");
 
 export function stampSeconds(stamp: string | null): number | null {
   const match = stamp ? /^(\d+):(\d{2}):(\d{2})$/.exec(stamp) : null;
@@ -1028,7 +1032,13 @@ export async function listLibrary(roomId: string, query: string | null): Promise
   const { rows } = await pool.query<LibraryRow>(
     `WITH q AS (SELECT websearch_to_tsquery('english', $2) AS query)
      SELECT ${LIBRARY_SELECT},
-            ts_headline('english', coalesce(nullif(a.body, ''), a.label), q.query, $3) AS snippet,
+            btrim(ts_headline(
+              'english',
+              coalesce(nullif(a.body, ''), a.label),
+              q.query,
+              CASE WHEN length(coalesce(nullif(a.body, ''), a.label)) <= ${SNIPPET_CHARS} THEN $4 ELSE $3 END
+            ), E' 	
+') AS snippet,
             hit.stamp AS hit_stamp
      ${LIBRARY_FROM}
      CROSS JOIN q
@@ -1042,7 +1052,7 @@ export async function listLibrary(roomId: string, query: string | null): Promise
      WHERE m.room_id = $1 AND a.search @@ q.query
      ORDER BY ts_rank_cd(a.search, q.query) DESC, a.created_at DESC
      LIMIT ${LIBRARY_LIMIT}`,
-    [roomId, query, HEADLINE_OPTIONS],
+    [roomId, query, HEADLINE_OPTIONS, HEADLINE_WHOLE],
   );
   return rows.map(toLibraryEntry);
 }

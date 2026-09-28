@@ -41,7 +41,9 @@ test.describe("room library", () => {
     // "pelican" finds "pelicans": English stemming, not substring matching.
     const { entries } = await library(rooms[0]!.id, alice.id, "pelican");
     expect(entries).toHaveLength(1);
-    expect(entries[0]!.snippet).toContain(`${START}pelicans${END}`);
+    // A document shorter than a snippet comes back whole: fragment mode once
+    // cut it down to the matched word alone.
+    expect(entries[0]!.snippet).toBe(`The ${START}pelicans${END} migrated south.`);
 
     expect((await library(rooms[0]!.id, alice.id, "walrus")).entries).toEqual([]);
     alice.close();

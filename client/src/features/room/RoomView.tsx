@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import type { LibraryEntry } from "@rmcollab/shared";
 import { ChatPanel } from "../chat/ChatPanel";
 import type { DocumentFocus } from "../jobs/focus";
@@ -26,7 +26,7 @@ function readSavedView(): RoomViewName {
   }
   return "notes";
 }
-import { UploadPanel } from "../upload/UploadPanel";
+import { AddMedia } from "../upload/AddMedia";
 import { ParticipantList } from "./ParticipantList";
 import { RoomSwitcher } from "./RoomSwitcher";
 import type { Realtime } from "../../ws/useRealtime";
@@ -97,9 +97,25 @@ export function RoomView({ realtime, sessionCode }: Props) {
       entry.job !== null && (entry.job.status === "queued" || entry.job.status === "processing"),
   ).length;
 
+  // On a narrow screen the sidebar is a drawer. It closes once a room switch has
+  // actually landed - not on the click, because a locked room asks for its code
+  // inside the drawer and closing it would hide the prompt.
+  const [navOpen, setNavOpen] = useState(false);
+  useEffect(() => {
+    if (state.synced) setNavOpen(false);
+  }, [state.activeRoomId, state.synced]);
+  useEffect(() => {
+    if (!navOpen) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setNavOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [navOpen]);
+
   return (
-    <main className="room" id="main-content" tabIndex={-1}>
-      <aside className="sidebar" aria-label="Session navigation">
+    <main className={`room${navOpen ? " nav-open" : ""}`} id="main-content" tabIndex={-1}>
+      <aside className="sidebar" id="room-nav" aria-label="Session navigation">
         <RoomSwitcher
           rooms={state.rooms}
           activeRoomId={state.activeRoomId}
@@ -116,9 +132,26 @@ export function RoomView({ realtime, sessionCode }: Props) {
           ownerId={activeRoom?.ownerId ?? null}
         />
       </aside>
+      {navOpen && (
+        <button
+          type="button"
+          className="nav-backdrop"
+          aria-label="Close rooms and people"
+          onClick={() => setNavOpen(false)}
+        />
+      )}
 
       <section className="panel" aria-labelledby="room-heading">
         <div className="panel-head">
+          <button
+            type="button"
+            className="nav-toggle"
+            aria-controls="room-nav"
+            aria-expanded={navOpen}
+            onClick={() => setNavOpen((open) => !open)}
+          >
+            <span aria-hidden="true">☰</span> Rooms
+          </button>
           <h2 id="room-heading">{activeRoom ? activeRoom.name : "Room"}</h2>
           <div className="view-switch" role="group" aria-label="View">
             <button
@@ -167,7 +200,7 @@ export function RoomView({ realtime, sessionCode }: Props) {
         </div>
 
         {view === "feed" && (
-          <UploadPanel
+          <AddMedia
             roomId={state.activeRoomId}
             participantId={state.me?.id ?? null}
             disabled={!live}
@@ -188,7 +221,7 @@ export function RoomView({ realtime, sessionCode }: Props) {
                 media={state.media}
                 onOpenInFeed={openInFeed}
                 uploader={
-                  <UploadPanel roomId={state.activeRoomId} participantId={state.me.id} disabled={!live} />
+                  <AddMedia roomId={state.activeRoomId} participantId={state.me.id} disabled={!live} />
                 }
               />
             </Suspense>

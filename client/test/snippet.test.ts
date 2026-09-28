@@ -39,3 +39,25 @@ describe("parseSnippet", () => {
     expect(parseSnippet("", false)).toEqual([]);
   });
 });
+
+describe("parseSnippet with markdown", () => {
+  it("shows a summary's words, not its syntax", () => {
+    const text = parseSnippet("**Key points** - queues ## Decisions `XAUTOCLAIM` wins", false, true)
+      .map((p) => p.text)
+      .join("");
+    expect(text).toBe("Key points · queues Decisions XAUTOCLAIM wins");
+  });
+
+  it("keeps hyphenated words and the match highlight intact", () => {
+    const parts = parseSnippet(`re-read the **${S}gateway${E}** notes`, false, true);
+    expect(parts.map((p) => p.text).join("")).toBe("re-read the gateway notes");
+    expect(parts.find((p) => p.match)?.text).toBe("gateway");
+  });
+
+  it("drops single-asterisk emphasis but leaves arithmetic and snake_case alone", () => {
+    const text = parseSnippet("Action items · *All participants*: read 2 * 3 and job_artifacts", false, true)
+      .map((p) => p.text)
+      .join("");
+    expect(text).toBe("Action items · All participants: read 2 * 3 and job_artifacts");
+  });
+});

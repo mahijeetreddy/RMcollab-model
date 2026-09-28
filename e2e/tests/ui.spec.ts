@@ -1,4 +1,5 @@
 import { expect, test, type Browser, type Page } from "@playwright/test";
+import { addToRoom } from "../ui.js";
 import { fileURLToPath } from "node:url";
 
 import { waitForStrategy } from "../helpers.js";
@@ -50,7 +51,7 @@ test("creating and joining a session reaches the room without errors", async ({ 
   // bare Session, and the resulting undefined crashed the whole React tree.
   const errors = trackErrors(page);
   await createAndJoin(page, "Alice");
-  await expect(page.getByRole("tab", { name: /^text$/i })).toBeVisible();
+  await expect(page.getByRole("button", { name: /browse files/i })).toBeVisible();
   expect(errors).toEqual([]);
 });
 
@@ -110,10 +111,7 @@ test("a locked room shows its owner and asks others for the code", async ({ page
 
 test("an image enhances on the GPU and shows before and after", async ({ page }) => {
   await createAndJoin(page, "Alice");
-  await page.getByRole("tab", { name: /^image$/i }).click();
-  await page.locator('input[type="file"]').first().setInputFiles(SMALL_PNG);
-  await page.locator("select").first().selectOption("realesrgan");
-  await page.getByRole("button", { name: /upload & enhance/i }).click();
+  await addToRoom(page, [{ file: SMALL_PNG, strategy: "realesrgan" }]);
 
   // The status badge's class, not the word "done": that word also appears in
   // hidden screen-reader text, which a text locator would latch onto first.
@@ -126,9 +124,7 @@ test("a recording opens as a searchable transcript tied to the player", async ({
   await waitForStrategy("audio", "comprehend");
   const errors = trackErrors(page);
   await createAndJoin(page, "Alice");
-  await page.getByRole("tab", { name: /^audio$/i }).click();
-  await page.locator('input[type="file"]').first().setInputFiles(LECTURE);
-  await page.getByRole("button", { name: /upload & enhance/i }).click();
+  await addToRoom(page, [{ file: LECTURE }]);
 
   // A transcript is a document, not an "after" to compare against.
   const transcriptTab = page.getByRole("tab", { name: "Transcript" });
@@ -146,6 +142,9 @@ test("a recording opens as a searchable transcript tied to the player", async ({
   await expect(page.locator(".doc-facts")).toContainText(/Whisper/);
 
   const lines = page.getByRole("list", { name: "Transcript" }).getByRole("listitem");
+  // The transcript text is fetched after the tab opens, and count() does not
+  // wait: without this it read 0 whenever the fetch lost the race.
+  await expect(lines.first()).toBeVisible();
   const total = await lines.count();
   expect(total).toBeGreaterThan(1);
 
@@ -183,8 +182,7 @@ test("a recording opens as a searchable transcript tied to the player", async ({
 test("the library finds a document and opens it in the feed", async ({ page }) => {
   const errors = trackErrors(page);
   await createAndJoin(page, "Alice");
-  await page.getByPlaceholder(/paste or write the text/i).fill("the albatross circled the harbour");
-  await page.getByRole("button", { name: /upload & enhance/i }).click();
+  await addToRoom(page, [{ text: "the albatross circled the harbour", strategy: "rulebased" }]);
   await expect(page.locator(".badge-status-done")).toBeVisible({ timeout: 60_000 });
 
   await page.getByRole("button", { name: "Library", exact: true }).click();
@@ -216,9 +214,7 @@ test("a text result marks what the enhancement changed", async ({ page }) => {
   // The rule-based strategy is deterministic, so the edits are known exactly.
   const errors = trackErrors(page);
   await createAndJoin(page, "Alice");
-  await page.locator("select").first().selectOption("rulebased");
-  await page.getByPlaceholder(/paste or write the text/i).fill("teh cat sat on teh mat");
-  await page.getByRole("button", { name: /upload & enhance/i }).click();
+  await addToRoom(page, [{ text: "teh cat sat on teh mat", strategy: "rulebased" }]);
 
   const card = page.locator(".job-card").first();
   await expect(card.locator(".diff-summary")).toContainText(/\d+ edits?/, { timeout: 60_000 });
@@ -239,9 +235,7 @@ test("a lecture video opens as a transcript whose timestamps seek the video", as
   await waitForStrategy("video", "comprehend");
   const errors = trackErrors(page);
   await createAndJoin(page, "Alice");
-  await page.getByRole("tab", { name: /^video$/i }).click();
-  await page.locator('input[type="file"]').first().setInputFiles(LECTURE_VIDEO);
-  await page.getByRole("button", { name: /upload & enhance/i }).click();
+  await addToRoom(page, [{ file: LECTURE_VIDEO }]);
 
   const transcriptTab = page.getByRole("tab", { name: "Transcript" });
   await expect(transcriptTab).toBeVisible({ timeout: 150_000 });
@@ -255,5 +249,35 @@ test("a lecture video opens as a transcript whose timestamps seek the video", as
   await expect(last).toHaveAttribute("aria-current", "true");
   const position = await player.evaluate((el) => (el as HTMLVideoElement).currentTime);
   expect(position).toBeGreaterThan(0);
+  expect(errors).toEqual([]);
+});
+
+test("several files at once are each identified and given a proposal, sent only on click", async ({ page }) => {
+  const errors = trackErrors(page);
+  await createAndJoin(page, "Alice");
+  const panel = page.locator(".add-media").first();
+  await panel.locator('input[type="file"]').setInputFiles([LECTURE, SMALL_PNG]);
+  await panel.getByRole("button", { name: /write or paste text/i }).click();
+  await panel.getByRole("textbox", { name: "Text" }).fill("teh group met on thursday");
+
+  const cards = panel.locator(".add-item");
+  await expect(cards).toHaveCount(3);
+  await expect(panel.getByText("Looking at your files")).toHaveCount(0, { timeout: 15_000 });
+  // Each kind gets the action that suits it, already chosen.
+  const action = (i: number) => cards.nth(i).locator(".add-action-title");
+  await expect(action(0)).toHaveText("Transcribe & summarise");
+  await expect(action(1)).toHaveText(/Read into notes|Sharpen & upscale/);
+  await expect(action(2)).toHaveText(/Polish the writing|Fix typos only/);
+
+  // The alternatives open on demand, and picking one closes them again.
+  await cards.nth(1).locator(".add-action").click();
+  await cards.nth(1).getByText("Quick brightness fix").click();
+  await expect(action(1)).toHaveText("Quick brightness fix");
+  await expect(cards.nth(1).locator(".add-choices")).toHaveCount(0);
+  await expect(panel.getByRole("button", { name: "Add 3 items to the room" })).toBeEnabled();
+
+  // Detection alone sends nothing.
+  await page.waitForTimeout(1_000);
+  await expect(page.locator(".job-card")).toHaveCount(0);
   expect(errors).toEqual([]);
 });

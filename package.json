@@ -23,7 +23,8 @@
     "typecheck": "npm run build -w shared && tsc --noEmit -p shared/tsconfig.json && tsc --noEmit -p gateway/tsconfig.json && tsc --noEmit -p legacy/tsconfig.json && tsc --noEmit -p client/tsconfig.json",
     "test:e2e": "npm --prefix e2e test",
     "latency": "node scripts/latency.mjs",
-    "check:notes-replicas": "docker cp scripts/notes-cross-replica.mjs rmcollab-gateway-1:/app/gateway/notes-cross-replica.mjs && docker exec -w /app/gateway rmcollab-gateway-1 node notes-cross-replica.mjs"
+    "check:notes-replicas": "docker cp scripts/notes-cross-replica.mjs rmcollab-gateway-1:/app/gateway/notes-cross-replica.mjs && docker exec -w /app/gateway rmcollab-gateway-1 node notes-cross-replica.mjs",
+    "screenshots": "node -e \"process.env.SCREENSHOTS='1';require('child_process').execSync('npm --prefix e2e test -- tests/readme-screenshots.spec.ts',{stdio:'inherit'})\""
   },
   "engines": {
     "node": ">=20"

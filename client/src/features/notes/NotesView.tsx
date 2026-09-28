@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { MediaItemWithJob } from "@rmcollab/shared";
 import { NOTES_FIELD } from "@rmcollab/shared/notes";
 import Collaboration from "@tiptap/extension-collaboration";
@@ -26,6 +26,9 @@ interface Props {
   /** The upload form, shown in a panel under the toolbar on demand. */
   uploader: ReactNode;
 }
+
+/** Wide enough for the outline beside a readable page. */
+const WIDE_ENOUGH = "(min-width: 1100px)";
 
 const SAVE_STATE: Record<SyncStatus, string> = {
   connecting: "Syncing…",
@@ -66,8 +69,32 @@ const Divider = () => <span className="gdoc-divider" aria-hidden="true" />;
 
 type BlockStyle = "paragraph" | "h1" | "h2" | "h3";
 
+/**
+ * Whether a sticky element is currently stuck, which CSS cannot say. A
+ * zero-height marker sits just above it: once the marker scrolls out of its
+ * scroll container, the element below it has stuck.
+ */
+function useStuck<T extends HTMLElement>() {
+  const marker = useRef<T | null>(null);
+  const [stuck, setStuck] = useState(false);
+  useEffect(() => {
+    const node = marker.current;
+    const root = node?.closest(".panel-body") ?? null;
+    if (!node || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver(([entry]) => setStuck(!entry!.isIntersecting), {
+      root,
+      // The scroll area's top padding is where the stuck toolbar sits.
+      rootMargin: "-17px 0px 0px 0px",
+    });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+  return { marker, stuck };
+}
+
 function Toolbar({ editor, onToggleOutline, outlineOpen }: { editor: Editor; onToggleOutline: () => void; outlineOpen: boolean }) {
   const mod = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl";
+  const { marker, stuck } = useStuck<HTMLDivElement>();
   const s = useEditorState({
     editor,
     selector: ({ editor: e }) => ({
@@ -103,7 +130,9 @@ function Toolbar({ editor, onToggleOutline, outlineOpen }: { editor: Editor; onT
   };
 
   return (
-    <div className="gdoc-toolbar" role="toolbar" aria-label="Formatting">
+    <>
+    <div ref={marker} className="gdoc-toolbar-marker" aria-hidden="true" />
+    <div className={`gdoc-toolbar${stuck ? " is-stuck" : ""}`} role="toolbar" aria-label="Formatting">
       <Tool label="Show document outline" active={outlineOpen} onRun={onToggleOutline}>
         {icons.outline}
       </Tool>
@@ -174,6 +203,7 @@ function Toolbar({ editor, onToggleOutline, outlineOpen }: { editor: Editor; onT
         {icons.clear}
       </Tool>
     </div>
+    </>
   );
 }
 
@@ -355,9 +385,24 @@ export default function NotesView({ realtime, roomId, roomName, sessionCode, me,
   const { session, status } = useRoomDoc(realtime, roomId, user);
   const collaborators = useCollaborators(session?.provider ?? null, me.id);
   const [words, setWords] = useState(0);
-  const [outlineOpen, setOutlineOpen] = useState(() => window.matchMedia("(min-width: 1100px)").matches);
+  // The outline sits beside the page when there is room for both. It follows the
+  // window as it is resized - closing when it gets narrow, reopening when it
+  // widens - until the person toggles it themselves, after which it is theirs.
+  const [outlineOpen, setOutlineOpen] = useState(() => window.matchMedia(WIDE_ENOUGH).matches);
+  const outlineChosen = useRef(false);
+  useEffect(() => {
+    const query = window.matchMedia(WIDE_ENOUGH);
+    const follow = (event: MediaQueryListEvent) => {
+      if (!outlineChosen.current) setOutlineOpen(event.matches);
+    };
+    query.addEventListener("change", follow);
+    return () => query.removeEventListener("change", follow);
+  }, []);
   const [adding, setAdding] = useState(false);
-  const toggleOutline = useCallback(() => setOutlineOpen((open) => !open), []);
+  const toggleOutline = useCallback(() => {
+    outlineChosen.current = true;
+    setOutlineOpen((open) => !open);
+  }, []);
   const room = useMemo(() => ({ media, openInFeed: onOpenInFeed }), [media, onOpenInFeed]);
 
   return (
@@ -393,7 +438,7 @@ export default function NotesView({ realtime, roomId, roomName, sessionCode, me,
 
         {adding && (
           <div className="gdoc-uploader">
-            <p>Uploads get their own section in these notes, filled in as the analysis finishes.</p>
+            <p>Each upload gets its own section in these notes, filled in as the analysis finishes.</p>
             {uploader}
           </div>
         )}

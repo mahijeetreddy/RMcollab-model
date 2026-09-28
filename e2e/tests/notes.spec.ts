@@ -1,4 +1,5 @@
 import { expect, test, type Browser, type Page } from "@playwright/test";
+import { addToRoom } from "../ui.js";
 
 /** Joins (or creates) a session in a fresh browser and opens the room notes. */
 async function openNotes(browser: Browser, name: string, code?: string): Promise<{ page: Page; code: string }> {
@@ -87,9 +88,7 @@ test.describe("room notes", () => {
     const { page: bob } = await openNotes(browser, "Bob", code);
 
     await alice.getByRole("button", { name: "Add media" }).click();
-    await alice.locator(".gdoc-uploader select").first().selectOption("rulebased");
-    await alice.getByPlaceholder(/paste or write the text/i).fill("teh group met on thursday");
-    await alice.getByRole("button", { name: /upload & enhance/i }).click();
+    await addToRoom(alice, [{ text: "teh group met on thursday", strategy: "rulebased" }]);
 
     // Everyone in the room sees the section, then its result, with no reload.
     const section = bob.locator(".doc-section");

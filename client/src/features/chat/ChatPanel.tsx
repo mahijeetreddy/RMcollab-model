@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import type { ChatMessage } from "@rmcollab/shared";
 import { formatTime } from "../../lib/format";
+import { EmptyState } from "../EmptyState";
 
 interface Props {
   messages: ChatMessage[];
@@ -154,7 +155,9 @@ export function ChatPanel({ messages, meId, canSend, onSend, typing, onTyping }:
 
       <div className="panel-body" ref={listRef}>
         {messages.length === 0 ? (
-          <p className="empty">No messages yet</p>
+          <EmptyState icon={<ChatGlyph />} title="No messages yet">
+            Messages go to everyone in this room. Press Enter to send, Shift+Enter for a new line.
+          </EmptyState>
         ) : (
           <div className="chat-list" role="log" aria-label="Room messages">
             {messages.map((message) => (
@@ -215,5 +218,14 @@ export function ChatPanel({ messages, meId, canSend, onSend, typing, onTyping }:
       </form>
     </section>
     </div>
+  );
+}
+
+function ChatGlyph() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M20 12a7.5 7.5 0 0 1-11 6.6L4 20l1.4-4.4A7.5 7.5 0 1 1 20 12Z" />
+      <path d="M8.5 12h.01M12 12h.01M15.5 12h.01" strokeWidth="2.6" />
+    </svg>
   );
 }

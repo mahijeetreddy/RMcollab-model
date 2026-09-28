@@ -145,6 +145,40 @@ export const icons = {
       <path d="m7 10 5 5 5-5" />
     </Icon>
   ),
+  upload: (
+    <Icon>
+      <path d="M12 15V4M7.5 8.5 12 4l4.5 4.5" />
+      <path d="M4 14v3.5A2.5 2.5 0 0 0 6.5 20h11a2.5 2.5 0 0 0 2.5-2.5V14" />
+    </Icon>
+  ),
+  pen: (
+    <Icon>
+      <path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z" />
+      <path d="m13.5 6.5 4 4" />
+    </Icon>
+  ),
+  sparkle: (
+    <Icon>
+      <path d="M12 3.5c.6 3.9 2.6 5.9 6.5 6.5-3.9.6-5.9 2.6-6.5 6.5-.6-3.9-2.6-5.9-6.5-6.5 3.9-.6 5.9-2.6 6.5-6.5Z" />
+      <path d="M19 15.5c.3 1.6 1 2.3 2.5 2.5-1.5.2-2.2 1-2.5 2.5-.3-1.5-1-2.3-2.5-2.5 1.5-.2 2.2-.9 2.5-2.5Z" />
+    </Icon>
+  ),
+  check: (
+    <Icon>
+      <path d="m5 12.5 4.5 4.5L19 7.5" />
+    </Icon>
+  ),
+  close: (
+    <Icon>
+      <path d="M6 6l12 12M18 6 6 18" />
+    </Icon>
+  ),
+  alert: (
+    <Icon>
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 7.5v5.5M12 16.4v.1" />
+    </Icon>
+  ),
 };
 
 /** Glyphs for the notes chrome and for upload sections, one per media type.

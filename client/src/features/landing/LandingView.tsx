@@ -4,6 +4,7 @@ import { api, ApiError } from "../../api/client";
 import { ThemeToggle } from "../../theme/ThemeToggle";
 import type { ThemeApi } from "../../theme/useTheme";
 import type { Credentials } from "../../ws/useRealtime";
+import { docIcons, icons } from "../notes/icons";
 
 interface Props {
   onEnter: (credentials: Credentials) => void;
@@ -17,9 +18,9 @@ function errorMessage(error: unknown): string {
 }
 
 const FEATURES: ReadonlyArray<{ title: string; body: string }> = [
-  { title: "Breakout rooms", body: "Split a session into focused rooms with their own chat." },
-  { title: "Live presence", body: "See who is in the room and who dropped, as it happens." },
-  { title: "GPU enhancement", body: "Upload text, images, audio or video and watch jobs stream." },
+  { title: "Shared live notes", body: "One page the whole room edits at once, with everyone's cursor." },
+  { title: "Media that writes itself up", body: "Lectures, whiteboards and notes become transcripts, summaries and to-dos." },
+  { title: "Private breakout rooms", body: "Split a session into focused rooms, locked with a code if you like." },
 ];
 
 export function LandingView({ onEnter, theme }: Props) {
@@ -106,18 +107,22 @@ export function LandingView({ onEnter, theme }: Props) {
       </header>
 
       <main className="landing-main" id="main-content">
+        <div className="landing-hero">
         <div className="landing-head">
           <p className="eyebrow">
             <span className="conn-dot" aria-hidden="true" />
             Real-time · no account needed
           </p>
           <h1>
-            Collaborate in rooms that <em>enhance your media</em>
+            Study together in rooms that <em>take the notes for you</em>
           </h1>
           <p>
-            Start a session, share the code, and work together in breakout rooms. Drop in text,
-            images, audio or video and watch GPU workers enhance them with live job progress.
+            Start a session, share the code, and work together in breakout rooms. Drop in a lecture
+            recording, a whiteboard photo or rough notes, and its transcript, summary and action items
+            land in a shared document everyone edits live.
           </p>
+        </div>
+        <HeroPreview />
         </div>
 
         <div className="landing-grid">
@@ -239,6 +244,60 @@ export function LandingView({ onEnter, theme }: Props) {
           ))}
         </ul>
       </main>
+    </div>
+  );
+}
+
+/** A still of the product for the empty half of the hero: decoration only. */
+function HeroPreview() {
+  return (
+    <div className="hero-preview" aria-hidden="true">
+      <div className="hero-doc">
+        <div className="hero-doc-head">
+          <span className="hero-doc-mark" />
+          <span className="hero-doc-title">Distributed systems · week 6</span>
+          <span className="hero-avatars">
+            <span style={{ background: "#e8710a" }}>P</span>
+            <span style={{ background: "#7c4dff" }}>M</span>
+            <span style={{ background: "var(--accent)" }}>A</span>
+          </span>
+        </div>
+        <div className="hero-section">
+          <div className="hero-section-head">
+            <span className="hero-section-icon">{docIcons.audio}</span>
+            <span>
+              <strong>lecture-6.mp3</strong>
+              <small>Transcribed &amp; summarised · 42 min</small>
+            </span>
+            <span className="hero-status">Added to notes</span>
+          </div>
+          <p className="hero-h">Key points</p>
+          <ul className="hero-points">
+            <li>
+              Redis Streams over Kafka: no ZooKeeper to run
+              <span className="hero-cursor" style={{ ["--c" as string]: "#e8710a" }}>
+                <span>Raven</span>
+              </span>
+            </li>
+            <li>Consumer groups give each worker its own slice</li>
+            <li>Exactly-once delivery is still an open question</li>
+          </ul>
+          <p className="hero-h">Action items</p>
+          <ul className="hero-tasks">
+            <li className="is-done">Raven drafts the consumer groups section</li>
+            <li>
+              Rori reruns the benchmark with three workers
+              <span className="hero-cursor" style={{ ["--c" as string]: "#7c4dff" }}>
+                <span>Rori</span>
+              </span>
+            </li>
+          </ul>
+        </div>
+      </div>
+      <div className="hero-chip hero-chip-a">
+        <span className="hero-chip-spark">{icons.sparkle}</span>
+        whiteboard.jpg → notes
+      </div>
     </div>
   );
 }
