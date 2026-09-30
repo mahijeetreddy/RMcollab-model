@@ -163,3 +163,99 @@ CREATE TABLE IF NOT EXISTS room_doc_updates (
   created_at BIGINT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS room_doc_updates_room_idx ON room_doc_updates(room_id, seq);
+
+-- Ask the room: each searchable document split into passages small enough to
+-- hand to a language model and specific enough to cite. A transcript passage
+-- keeps the time its first line is spoken, so a citation can seek the player.
+-- `embedding` is filled asynchronously by a worker (snowflake-arctic-embed-m,
+-- 768 dimensions); a passage without one is still found by its keywords.
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE TABLE IF NOT EXISTS artifact_passages (
+  id          TEXT PRIMARY KEY,
+  artifact_id TEXT NOT NULL REFERENCES job_artifacts(id) ON DELETE CASCADE,
+  ord         INT NOT NULL,
+  body        TEXT NOT NULL,
+  start_s     REAL,
+  embedding   vector(768),
+  created_at  BIGINT NOT NULL,
+  UNIQUE (artifact_id, ord)
+);
+ALTER TABLE artifact_passages ADD COLUMN IF NOT EXISTS search tsvector
+  GENERATED ALWAYS AS (to_tsvector('english', body)) STORED;
+CREATE INDEX IF NOT EXISTS artifact_passages_search_idx ON artifact_passages USING GIN (search);
+-- No ANN index on `embedding`, deliberately: every question is scoped to one
+-- room, a few hundred passages at most, so an exact scan is both correct and
+-- fast. An HNSW index would only pay off at scale, and filtering it by room
+-- can return fewer than k rows.
+-- Set once an artifact has been split, so the indexer never re-splits one whose
+-- text yielded no passages.
+ALTER TABLE job_artifacts ADD COLUMN IF NOT EXISTS passages_at BIGINT;
+
+-- A name someone gave an upload. Null means the file name, or for text, a
+-- title taken from its first words when it was added.
+ALTER TABLE media_items ADD COLUMN IF NOT EXISTS title TEXT;
+
+-- When anyone last did anything in a session. Sessions untouched for
+-- SESSION_TTL_DAYS are deleted with everything in them (gateway/src/lifecycle.ts).
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_active_at BIGINT;
+UPDATE sessions SET last_active_at = created_at WHERE last_active_at IS NULL;
+CREATE INDEX IF NOT EXISTS sessions_last_active_idx ON sessions(last_active_at);
+
+-- Notes history: whole-document restore points. Anyone in a room can edit its
+-- notes, and anyone can erase them; these are how that is undone. Taken hourly
+-- while a room is being edited, before a large deletion, and before a restore.
+CREATE TABLE IF NOT EXISTS room_doc_versions (
+  id         TEXT PRIMARY KEY,
+  room_id    TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+  created_at BIGINT NOT NULL,
+  reason     TEXT NOT NULL,
+  words      INT NOT NULL,
+  state      BYTEA NOT NULL
+);
+CREATE INDEX IF NOT EXISTS room_doc_versions_room_idx ON room_doc_versions(room_id, created_at DESC);
+
+-- Removing people. A room's owner can remove someone from it: they are moved
+-- out and barred from coming back into that room. Removing someone from the
+-- main room removes them from the session. With guest identity this bars that
+-- participant, not the person - they could rejoin under a new name with the
+-- code - which is why a breakout room can also be locked with a code.
+CREATE TABLE IF NOT EXISTS room_bans (
+  room_id        TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+  participant_id TEXT NOT NULL REFERENCES participants(id) ON DELETE CASCADE,
+  banned_at      BIGINT NOT NULL,
+  PRIMARY KEY (room_id, participant_id)
+);
+ALTER TABLE participants ADD COLUMN IF NOT EXISTS removed_at BIGINT;
+
+-- Several documents a room. The room's own notes are document 'main' (so every
+-- row written before documents existed already belongs to it); the others are
+-- made by people. Uploads always write into 'main'.
+CREATE TABLE IF NOT EXISTS room_documents (
+  room_id    TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
+  id         TEXT NOT NULL,
+  title      TEXT NOT NULL,
+  is_main    BOOLEAN NOT NULL DEFAULT FALSE,
+  created_by TEXT REFERENCES participants(id) ON DELETE SET NULL,
+  created_at BIGINT NOT NULL,
+  updated_at BIGINT NOT NULL,
+  PRIMARY KEY (room_id, id)
+);
+ALTER TABLE room_docs ADD COLUMN IF NOT EXISTS doc_id TEXT NOT NULL DEFAULT 'main';
+ALTER TABLE room_docs DROP CONSTRAINT IF EXISTS room_docs_pkey;
+CREATE UNIQUE INDEX IF NOT EXISTS room_docs_room_doc_idx ON room_docs(room_id, doc_id);
+ALTER TABLE room_doc_updates ADD COLUMN IF NOT EXISTS doc_id TEXT NOT NULL DEFAULT 'main';
+CREATE INDEX IF NOT EXISTS room_doc_updates_doc_idx ON room_doc_updates(room_id, doc_id, seq);
+ALTER TABLE room_doc_versions ADD COLUMN IF NOT EXISTS doc_id TEXT NOT NULL DEFAULT 'main';
+CREATE INDEX IF NOT EXISTS room_doc_versions_doc_idx ON room_doc_versions(room_id, doc_id, created_at DESC);
+
+-- Keeping removed people out. Removing someone from a session changes its code;
+-- the old one is kept here, so it still brings back a current member who has
+-- their participant id (a reload, Recent sessions) but admits nobody new.
+CREATE TABLE IF NOT EXISTS retired_session_codes (
+  code       TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  retired_at BIGINT NOT NULL
+);
+-- A waiting room: when on, someone new waits until the owner lets them in.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS waiting_room BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE participants ADD COLUMN IF NOT EXISTS waiting BOOLEAN NOT NULL DEFAULT FALSE;

@@ -28,6 +28,9 @@ RUN pip install --no-cache-dir \
     -r requirements-audio.txt \
     -r requirements-video.txt
 
+COPY workers/requirements-errors.txt ./
+RUN pip install --no-cache-dir -r requirements-errors.txt
+
 COPY workers workers
 
 ENV PYTHONPATH=/app \

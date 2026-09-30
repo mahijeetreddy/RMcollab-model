@@ -15,16 +15,16 @@ export interface DocSession {
  * in development, and a document built outside the effect would be destroyed by
  * the first cleanup while the editor was still bound to it.
  */
-export function useRoomDoc(realtime: Realtime, roomId: string, user: CollaboratorUser) {
+export function useRoomDoc(realtime: Realtime, roomId: string, docId: string, user: CollaboratorUser) {
   const { sendDoc, subscribeDoc } = realtime;
   const [session, setSession] = useState<DocSession | null>(null);
   const [status, setStatus] = useState<SyncStatus>("connecting");
 
   useEffect(() => {
     const doc = new Y.Doc();
-    const provider = new RoomDocProvider(doc, (data) => sendDoc(roomId, data), user);
-    const unsubscribe = subscribeDoc((forRoom, data) => {
-      if (forRoom === roomId) provider.receive(data);
+    const provider = new RoomDocProvider(doc, (data) => sendDoc(roomId, data, docId), user);
+    const unsubscribe = subscribeDoc((forRoom, data, forDoc) => {
+      if (forRoom === roomId && forDoc === docId) provider.receive(data);
     });
     const stopStatus = provider.onStatus(setStatus);
     setSession({ doc, provider });
@@ -37,7 +37,7 @@ export function useRoomDoc(realtime: Realtime, roomId: string, user: Collaborato
     };
     // The user's identity is fixed while the view is mounted, so it is not a
     // dependency: a rename should not rebuild the document.
-  }, [roomId, sendDoc, subscribeDoc]);
+  }, [roomId, docId, sendDoc, subscribeDoc]);
 
   // Every time the gateway confirms the room (first join, reconnect, switching
   // back), restart the sync handshake: it exchanges exactly the difference.

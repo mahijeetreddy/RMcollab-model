@@ -2,6 +2,7 @@ import * as decoding from "lib0/decoding";
 import * as encoding from "lib0/encoding";
 import * as awarenessProtocol from "y-protocols/awareness";
 import * as syncProtocol from "y-protocols/sync";
+import { NOTES_FIELD } from "@rmcollab/shared/notes";
 import * as Y from "yjs";
 
 /**
@@ -50,8 +51,17 @@ export interface DocStore {
   compact(roomId: string): Promise<unknown>;
 }
 
+/** Where restore points go. Optional: without it the hub keeps no history. */
+export interface DocHistory {
+  save(roomId: string, state: Uint8Array, reason: string, words: number): Promise<unknown>;
+  latestAt(roomId: string): Promise<number | null>;
+}
+
 export interface DocHubOptions {
   store: DocStore;
+  history?: DocHistory;
+  /** How often a room being edited gets a restore point. */
+  versionEveryMs?: number;
   publish(roomId: string, data: string, from: string): Promise<unknown>;
   /** Batch window: keystrokes within it become one stored row. */
   flushMs?: number;
@@ -60,6 +70,32 @@ export interface DocHubOptions {
 }
 
 const toBase64 = (bytes: Uint8Array) => Buffer.from(bytes).toString("base64");
+
+/** A deletion this large, against a recent copy, gets a restore point first. */
+const LARGE_DELETION_CHARS = 400;
+const LARGE_DELETION_SHARE = 0.4;
+/** How stale the kept copy may get. A copy is refreshed whenever the notes grow. */
+const BASELINE_MS = 30_000;
+/**
+ * Attempts at the final save when a copy is released. Its last editor has gone,
+ * so nobody would resend what a failed save loses; a few tries ride out a
+ * database blip. Not unbounded: a room deleted meanwhile fails for good.
+ */
+const RELEASE_SAVE_ATTEMPTS = 3;
+
+/** The notes' size in characters of markup: enough to notice most of it vanishing. */
+function notesSize(doc: Y.Doc): number {
+  return doc.getXmlFragment(NOTES_FIELD).toString().length;
+}
+
+/** Words in a saved state, for the version list. */
+export function wordsIn(state: Uint8Array): number {
+  const doc = new Y.Doc();
+  Y.applyUpdate(doc, state);
+  const text = doc.getXmlFragment(NOTES_FIELD).toString().replace(/<[^>]+>/g, " ");
+  doc.destroy();
+  return (text.match(/[\p{L}\p{N}][\p{L}\p{N}'’-]*/gu) ?? []).length;
+}
 const fromBase64 = (data: string) => new Uint8Array(Buffer.from(data, "base64"));
 
 function syncUpdateMessage(update: Uint8Array): Uint8Array {
@@ -84,6 +120,9 @@ class RoomDoc {
   readonly owned = new Map<string, Set<number>>();
   pending: Uint8Array[] = [];
   flushTimer: NodeJS.Timeout | null = null;
+  /** A recent copy of the whole document and its size, to restore if much of it is deleted. */
+  baseline: { state: Uint8Array; size: number; at: number } | null = null;
+  lastVersionAt = 0;
   catchUpTimer: NodeJS.Timeout | null = null;
   ready: Promise<void> = Promise.resolve();
 
@@ -98,8 +137,10 @@ export class RoomDocHub {
   private readonly flushMs: number;
   private readonly compactAfter: number;
   private readonly log: (message: string, err?: unknown) => void;
+  private readonly versionEveryMs: number;
 
   constructor(private readonly options: DocHubOptions) {
+    this.versionEveryMs = options.versionEveryMs ?? 60 * 60 * 1000;
     this.flushMs = options.flushMs ?? 400;
     this.compactAfter = options.compactAfter ?? 200;
     this.log = options.log ?? ((message, err) => console.warn(`[docs] ${message}`, err ?? ""));
@@ -181,8 +222,41 @@ export class RoomDocHub {
     if (!room) return;
     this.rooms.delete(roomId);
     await room.ready.catch(() => undefined);
-    await this.flush(roomId, room);
+    // flush puts a failed batch back in `pending`, so what is left is unsaved.
+    for (let attempt = 1; attempt <= RELEASE_SAVE_ATTEMPTS; attempt += 1) {
+      await this.flush(roomId, room);
+      if (room.pending.length === 0) break;
+      if (attempt < RELEASE_SAVE_ATTEMPTS) await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+    }
+    if (room.pending.length > 0) this.log(`gave up saving ${roomId} as it was released`);
     this.destroy(room);
+  }
+
+  /**
+   * A document that was deleted: released without saving, since what it holds
+   * belongs to nothing any more - a save here would leave rows for a document
+   * that no longer exists. Its editors are told by the room's own event.
+   */
+  discard(key: string): void {
+    const room = this.rooms.get(key);
+    if (!room) return;
+    this.rooms.delete(key);
+    this.destroy(room);
+  }
+
+  /** The keys of a room's documents open here: its main one and any `<roomId>:<docId>`. */
+  keysOf(roomId: string): string[] {
+    return [...this.rooms.keys()].filter((key) => key === roomId || key.startsWith(`${roomId}:`));
+  }
+
+  /** A socket left a room: out of every document of it. */
+  leaveAll(roomId: string, peerId: string): void {
+    for (const key of this.keysOf(roomId)) this.leave(key, peerId);
+  }
+
+  /** This replica stopped hearing a room: save and release every document of it. */
+  async dropAll(roomId: string): Promise<void> {
+    await Promise.all(this.keysOf(roomId).map((key) => this.drop(key)));
   }
 
   /** The current document, loading it if needed. */
@@ -269,9 +343,17 @@ export class RoomDocHub {
     );
 
     room.ready = this.options.store.load(roomId).then(
-      (parts) => {
+      async (parts) => {
         // Applied as one merged update: a single transaction, one render.
         if (parts.length > 0) Y.applyUpdate(room.doc, Y.mergeUpdates(parts), FROM_STORAGE);
+        room.baseline = { state: Y.encodeStateAsUpdate(room.doc), size: notesSize(room.doc), at: Date.now() };
+        // Known before the first save, or every edit to a room not open here
+        // would look an hour overdue for a restore point.
+        try {
+          room.lastVersionAt = (await this.options.history?.latestAt(roomId)) ?? 0;
+        } catch {
+          room.lastVersionAt = Date.now();
+        }
         // A batch another replica published just before this one subscribed,
         // and had not saved yet when the load ran, would otherwise be missed:
         // read storage once more after a flush window. Idempotent, so cheap.
@@ -315,6 +397,7 @@ export class RoomDocHub {
     if (room.pending.length === 0) return;
     const batch = room.pending;
     room.pending = [];
+    this.keepHistory(roomId, room);
     try {
       const waiting = await this.options.store.append(roomId, Y.mergeUpdates(batch));
       if (waiting >= this.compactAfter) {
@@ -326,6 +409,39 @@ export class RoomDocHub {
       room.pending = [...batch, ...room.pending];
       this.log(`saving ${roomId} failed; will retry`, err);
       this.scheduleFlush(roomId, room);
+    }
+  }
+
+  /**
+   * Restore points, checked once per saved batch rather than per keystroke:
+   *   - before a large deletion: the notes shrank by 40% and 400 characters
+   *     against a copy at most BASELINE_MS old, so that copy is kept
+   *   - hourly, while the room is being edited
+   * Saving is fire-and-forget; history must never slow down or fail an edit.
+   */
+  private keepHistory(roomId: string, room: RoomDoc): void {
+    const history = this.options.history;
+    if (!history) return;
+    const now = Date.now();
+    const size = notesSize(room.doc);
+    const base = room.baseline;
+    const save = (state: Uint8Array, reason: string) =>
+      history
+        .save(roomId, state, reason, wordsIn(state))
+        .catch((err: unknown) => this.log(`saving a version of ${roomId} failed`, err));
+
+    if (base && base.size - size >= LARGE_DELETION_CHARS && size <= base.size * (1 - LARGE_DELETION_SHARE)) {
+      void save(base.state, "Before a large deletion");
+      room.lastVersionAt = now;
+      // The next deletion is measured from here, not from the copy just kept.
+      room.baseline = { state: Y.encodeStateAsUpdate(room.doc), size, at: now };
+      return;
+    } else if (now - room.lastVersionAt >= this.versionEveryMs) {
+      void save(Y.encodeStateAsUpdate(room.doc), "Hourly");
+      room.lastVersionAt = now;
+    }
+    if (!base || now - base.at >= BASELINE_MS || size >= base.size) {
+      room.baseline = { state: Y.encodeStateAsUpdate(room.doc), size, at: now };
     }
   }
 

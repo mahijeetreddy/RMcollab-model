@@ -151,6 +151,11 @@ export const icons = {
       <path d="M4 14v3.5A2.5 2.5 0 0 0 6.5 20h11a2.5 2.5 0 0 0 2.5-2.5V14" />
     </Icon>
   ),
+  send: (
+    <Icon>
+      <path d="M12 19V5M6 11l6-6 6 6" />
+    </Icon>
+  ),
   pen: (
     <Icon>
       <path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z" />

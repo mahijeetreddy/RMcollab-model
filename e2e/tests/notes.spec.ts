@@ -1,22 +1,22 @@
 import { expect, test, type Browser, type Page } from "@playwright/test";
-import { addToRoom } from "../ui.js";
+import { addToRoom, openRoomNotes } from "../ui.js";
 
 /** Joins (or creates) a session in a fresh browser and opens the room notes. */
 async function openNotes(browser: Browser, name: string, code?: string): Promise<{ page: Page; code: string }> {
   const page = await (await browser.newContext()).newPage();
   await page.goto("/");
   if (code) {
-    await page.getByPlaceholder("ABC123").fill(code);
+    await page.getByLabel("Session code").fill(code);
   } else {
     await page.getByRole("button", { name: /create session/i }).click();
-    await expect(page.getByPlaceholder("ABC123")).toHaveValue(/^[A-Z0-9]{6}$/);
+    await expect(page.getByLabel("Session code")).toHaveValue(/^[A-Z0-9]{5}-[A-Z0-9]{5}$/);
   }
-  const joined = await page.getByPlaceholder("ABC123").inputValue();
+  const joined = await page.getByLabel("Session code").inputValue();
   await page.getByPlaceholder("Ada").fill(name);
   await page.getByRole("button", { name: /join session/i }).click();
   await expect(page.getByText("Main Room").first()).toBeVisible();
   await page.getByRole("button", { name: "Notes", exact: true }).click();
-  await expect(page.locator(".gdoc-save")).toContainText("Saved to the room");
+  await openRoomNotes(page);
   return { page, code: joined };
 }
 
@@ -93,13 +93,13 @@ test.describe("room notes", () => {
     // Everyone in the room sees the section, then its result, with no reload.
     const section = bob.locator(".doc-section");
     await expect(section).toHaveCount(1);
-    await expect(section.locator(".doc-section-title")).toHaveText("Text from Alice");
+    await expect(section.locator(".doc-section-title")).toHaveText("teh group met on thursday");
     await expect(section.locator(".doc-section-status")).toHaveText("Added to notes", { timeout: 60_000 });
     await expect(section.locator(".doc-section-body")).toContainText("The group met on thursday.");
 
     // The section is part of the notes: the outline lists it, and people can
     // write in it like anywhere else.
-    await expect(bob.locator(".gdoc-outline")).toContainText("Text from Alice");
+    await expect(bob.locator(".gdoc-outline")).toContainText("teh group met on thursday");
     await section.locator(".doc-section-body p").last().click();
     await bob.keyboard.press("End");
     await bob.keyboard.type(" (Bob: confirmed)");

@@ -20,6 +20,8 @@ export interface StrategyAdvert {
   media_type: MediaType;
   is_default: boolean;
   available: boolean;
+  /** Why it cannot run, for a person; empty while it can. Absent from older workers. */
+  unavailable_reason: string;
   explicit_default: boolean;
   queue: string;
 }
@@ -67,6 +69,7 @@ export function buildCatalogue(adverts: StrategyAdvert[]): Catalogue {
     description: a.description,
     isDefault: defaults.get(a.media_type) === a.name,
     available: a.available,
+    unavailableReason: a.available ? null : a.unavailable_reason || null,
   }));
   strategies.sort((a, b) =>
     a.mediaType === b.mediaType

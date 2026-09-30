@@ -1,14 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { MediaItemWithJob } from "@rmcollab/shared";
-import { NOTES_FIELD } from "@rmcollab/shared/notes";
+import { formatSessionCode, type MediaItemWithJob, type RoomDocument } from "@rmcollab/shared";
+import { MAIN_DOC_ID, NOTES_FIELD } from "@rmcollab/shared/notes";
 import Collaboration from "@tiptap/extension-collaboration";
 import CollaborationCaret from "@tiptap/extension-collaboration-caret";
 import { CharacterCount, Placeholder } from "@tiptap/extensions";
+import type { JSONContent } from "@tiptap/core";
+import type { Node as PMNode } from "@tiptap/pm/model";
 import { EditorContent, ReactNodeViewRenderer, useEditor, useEditorState, type Editor } from "@tiptap/react";
 import { collaboratorColor } from "../../lib/colors";
 import { initials } from "../../lib/format";
 import type { Realtime } from "../../ws/useRealtime";
+import { parseSourceHref, type SourceTarget } from "../ask/sourceLinks";
 import { NotesRoom } from "./context";
+import { api } from "../../api/client";
+import { ExportMenu } from "./ExportMenu";
+import { VersionHistory } from "./VersionHistory";
 import { useCollaborators, useRoomDoc, type DocSession } from "./hooks";
 import { docIcons, icons } from "./icons";
 import type { CollaboratorUser, SyncStatus } from "./provider";
@@ -25,6 +31,64 @@ interface Props {
   onOpenInFeed: (mediaItemId: string) => void;
   /** The upload form, shown in a panel under the toolbar on demand. */
   uploader: ReactNode;
+  /** A section to scroll to, from an Ask the room citation. */
+  target?: NotesTarget | null;
+  /** Content to add at the end, from Ask the room's "Add to notes". */
+  insert?: NotesInsert | null;
+  /** Follows a citation link in the notes to its source. */
+  onOpenSource?: (target: SourceTarget) => void;
+  /** Which of the room's documents this is. */
+  docId?: string;
+  document?: RoomDocument | null;
+  /** Back to the room's list of documents. */
+  onBack?: () => void;
+}
+
+export interface NotesTarget {
+  /** A NotesSection key: "u:<mediaItemId>", "h:<n>" or "top". */
+  key: string;
+  nonce: number;
+}
+
+export interface NotesInsert {
+  content: JSONContent[];
+  nonce: number;
+}
+
+/**
+ * Where a notes section starts, found by the same rules the gateway uses to cut
+ * the notes into sections (notesSections in the shared package): upload
+ * sections by their media id, the rest by counting top-level headings.
+ */
+export function sectionPosition(doc: PMNode, key: string): number | null {
+  if (key === "top") return 0;
+  let headings = 0;
+  let found: number | null = null;
+  doc.forEach((node, offset) => {
+    if (found !== null) return;
+    if (key.startsWith("u:") && node.type.name === UploadSection.name && node.attrs.mediaItemId === key.slice(2)) found = offset;
+    if (node.type.name === "heading") {
+      if (key === "h:" + headings) found = offset;
+      headings += 1;
+    }
+  });
+  return found;
+}
+
+/** The source a click on a citation link points at, if it was one. */
+function sourceLinkTarget(event: MouseEvent): SourceTarget | null {
+  const anchor = event.target instanceof Element ? event.target.closest("a") : null;
+  return parseSourceHref(anchor?.getAttribute("href"));
+}
+
+/** Scrolls a top-level node into view and marks it for a moment. */
+function reveal(editor: Editor, pos: number) {
+  const dom = editor.view.nodeDOM(pos);
+  if (!(dom instanceof HTMLElement)) return;
+  const still = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  dom.scrollIntoView({ block: "center", behavior: still ? "auto" : "smooth" });
+  dom.classList.add("is-revealed");
+  window.setTimeout(() => dom.classList.remove("is-revealed"), 2200);
 }
 
 /** Wide enough for the outline beside a readable page. */
@@ -299,10 +363,10 @@ function ShareButton({ sessionCode, roomName }: { sessionCode: string; roomName:
   }, [copied]);
   const share = async () => {
     try {
-      await navigator.clipboard.writeText(`Join "${roomName}" on RMcollab with session code ${sessionCode}`);
+      await navigator.clipboard.writeText(`Join "${roomName}" on RMcollab with session code ${formatSessionCode(sessionCode)}`);
       setCopied(true);
     } catch {
-      window.prompt("Copy this session code to invite people:", sessionCode);
+      window.prompt("Copy this session code to invite people:", formatSessionCode(sessionCode));
     }
   };
   return (
@@ -327,6 +391,11 @@ function NotesEditor({
   outlineOpen,
   onToggleOutline,
   onWords,
+  onEditor,
+  synced,
+  target,
+  insert,
+  onOpenSource,
 }: {
   session: DocSession;
   user: CollaboratorUser;
@@ -334,7 +403,16 @@ function NotesEditor({
   outlineOpen: boolean;
   onToggleOutline: () => void;
   onWords: (words: number) => void;
+  onEditor: (editor: Editor | null) => void;
+  synced: boolean;
+  target: NotesTarget | null;
+  insert: NotesInsert | null;
+  onOpenSource?: (target: SourceTarget) => void;
 }) {
+  // Read through a ref: the editor is built once per session, and its click
+  // handler must reach the latest callback rather than the first one.
+  const openSourceRef = useRef(onOpenSource);
+  openSourceRef.current = onOpenSource;
   const editor = useEditor(
     {
       extensions: [
@@ -350,6 +428,27 @@ function NotesEditor({
       ],
       editorProps: {
         attributes: { class: "notes-prose", "aria-label": `Shared notes for ${roomName}`, spellcheck: "true" },
+        // A citation link opens its source in the app. Any other link keeps
+        // the editor's behaviour (a click places the cursor, for editing).
+        handleClick: (_view, _pos, event) => {
+          const target = sourceLinkTarget(event);
+          if (!target) return false;
+          event.preventDefault();
+          openSourceRef.current?.(target);
+          return true;
+        },
+        // The browser's own link handling (Ctrl-click, middle-click opening a
+        // tab) would load the app again at a fragment; a citation is not a page.
+        handleDOMEvents: {
+          click: (_view, event) => {
+            if (sourceLinkTarget(event)) event.preventDefault();
+            return false;
+          },
+          auxclick: (_view, event) => {
+            if (sourceLinkTarget(event)) event.preventDefault();
+            return false;
+          },
+        },
       },
     },
     [session],
@@ -360,6 +459,32 @@ function NotesEditor({
     selector: ({ editor: e }) => (e ? (e.storage.characterCount as { words: () => number }).words() : 0),
   });
   useEffect(() => onWords(words ?? 0), [words, onWords]);
+  useEffect(() => {
+    onEditor(editor);
+    return () => onEditor(null);
+  }, [editor, onEditor]);
+
+  // Both wait for the first sync: before it the page is empty, so a section
+  // cannot be found, and content added then could land ahead of the notes that
+  // are still arriving.
+  const doneTarget = useRef(0);
+  useEffect(() => {
+    if (!editor || !target || !synced || doneTarget.current === target.nonce) return;
+    doneTarget.current = target.nonce;
+    const pos = sectionPosition(editor.state.doc, target.key);
+    if (pos !== null) window.requestAnimationFrame(() => reveal(editor, pos));
+  }, [editor, target, synced]);
+
+  const doneInsert = useRef(0);
+  useEffect(() => {
+    if (!editor || !insert || !synced || doneInsert.current === insert.nonce) return;
+    doneInsert.current = insert.nonce;
+    // At the document's end, not the cursor's: the end may be inside an
+    // upload's section, and an answer is not part of that upload.
+    const at = editor.state.doc.content.size;
+    editor.chain().insertContentAt(at, insert.content).run();
+    window.requestAnimationFrame(() => reveal(editor, at));
+  }, [editor, insert, synced]);
 
   if (!editor) return null;
   return (
@@ -377,12 +502,41 @@ function NotesEditor({
   );
 }
 
-export default function NotesView({ realtime, roomId, roomName, sessionCode, me, media, onOpenInFeed, uploader }: Props) {
+export default function NotesView({
+  realtime,
+  roomId,
+  roomName,
+  sessionCode,
+  me,
+  media,
+  onOpenInFeed,
+  uploader,
+  target = null,
+  insert = null,
+  onOpenSource,
+  docId = MAIN_DOC_ID,
+  document = null,
+  onBack,
+}: Props) {
+  const isMain = docId === MAIN_DOC_ID;
+  const [fetchedTitle, setFetchedTitle] = useState<string | null>(null);
+  useEffect(() => {
+    if (document || isMain) return;
+    let current = true;
+    api
+      .listDocuments(roomId, me.id)
+      .then((docs) => current && setFetchedTitle(docs.find((d) => d.id === docId)?.title ?? null))
+      .catch(() => undefined);
+    return () => {
+      current = false;
+    };
+  }, [document, isMain, roomId, docId, me.id]);
+  const title = document?.title ?? fetchedTitle ?? (isMain ? "Room notes" : "Untitled document");
   const user = useMemo<CollaboratorUser>(
     () => ({ id: me.id, name: me.displayName, color: collaboratorColor(me.id) }),
     [me.id, me.displayName],
   );
-  const { session, status } = useRoomDoc(realtime, roomId, user);
+  const { session, status } = useRoomDoc(realtime, roomId, docId, user);
   const collaborators = useCollaborators(session?.provider ?? null, me.id);
   const [words, setWords] = useState(0);
   // The outline sits beside the page when there is room for both. It follows the
@@ -399,6 +553,9 @@ export default function NotesView({ realtime, roomId, roomName, sessionCode, me,
     return () => query.removeEventListener("change", follow);
   }, []);
   const [adding, setAdding] = useState(false);
+  const [editor, setEditor] = useState<Editor | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const closeHistory = useCallback(() => setHistoryOpen(false), []);
   const toggleOutline = useCallback(() => {
     outlineChosen.current = true;
     setOutlineOpen((open) => !open);
@@ -409,9 +566,14 @@ export default function NotesView({ realtime, roomId, roomName, sessionCode, me,
     <NotesRoom.Provider value={room}>
       <section className="gdoc" aria-labelledby="notes-heading">
         <header className="gdoc-bar">
+          {onBack && (
+            <button type="button" className="ghost gdoc-back" onClick={onBack} aria-label="All documents">
+              <span aria-hidden="true">←</span>
+            </button>
+          )}
           <span className="gdoc-logo">{docIcons.doc}</span>
           <div className="gdoc-titles">
-            <h3 id="notes-heading">{roomName} notes</h3>
+            <h3 id="notes-heading">{title}</h3>
             <p className={`gdoc-save is-${status}`} role="status">
               <span className="gdoc-save-icon" aria-hidden="true">
                 {docIcons.cloud}
@@ -424,19 +586,32 @@ export default function NotesView({ realtime, roomId, roomName, sessionCode, me,
           </div>
           <div className="gdoc-actions">
             <Presence users={collaborators} me={user} />
+            {/* Uploads write into the room's notes, so that is where adding lives. */}
+            {isMain && (
+              <button
+                type="button"
+                className="gdoc-add"
+                aria-expanded={adding}
+                onClick={() => setAdding((open) => !open)}
+              >
+                Add media
+              </button>
+            )}
             <button
               type="button"
-              className="gdoc-add"
-              aria-expanded={adding}
-              onClick={() => setAdding((open) => !open)}
+              className="gdoc-add gdoc-history"
+              onClick={() => setHistoryOpen(true)}
+              aria-haspopup="dialog"
+              title="Version history"
             >
-              Add media
+              History
             </button>
+            <ExportMenu editor={editor} roomName={isMain ? roomName : title} media={isMain ? media : []} />
             <ShareButton sessionCode={sessionCode} roomName={roomName} />
           </div>
         </header>
 
-        {adding && (
+        {adding && isMain && (
           <div className="gdoc-uploader">
             <p>Each upload gets its own section in these notes, filled in as the analysis finishes.</p>
             {uploader}
@@ -445,13 +620,18 @@ export default function NotesView({ realtime, roomId, roomName, sessionCode, me,
 
         {session ? (
           <NotesEditor
-            key={roomId}
+            key={`${roomId}:${docId}`}
             session={session}
             user={user}
             roomName={roomName}
             outlineOpen={outlineOpen}
             onToggleOutline={toggleOutline}
             onWords={setWords}
+            onEditor={setEditor}
+            synced={status === "synced"}
+            target={target}
+            insert={insert}
+            onOpenSource={onOpenSource}
           />
         ) : (
           <div className="gdoc-workspace">
@@ -464,6 +644,7 @@ export default function NotesView({ realtime, roomId, roomName, sessionCode, me,
             </div>
           </div>
         )}
+        {historyOpen && <VersionHistory roomId={roomId} docId={docId} participantId={me.id} onClose={closeHistory} />}
       </section>
     </NotesRoom.Provider>
   );

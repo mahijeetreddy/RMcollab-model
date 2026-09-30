@@ -92,5 +92,96 @@ class StrategyAdvert:
     media_type: MediaType
     is_default: bool
     available: bool
+    unavailable_reason: str
     explicit_default: bool
     queue: str
+
+
+# --- Ask the room ------------------------------------------------------------
+# Mirrors the "Ask the room" block of shared/src/events.ts. The worker embeds
+# (questions, notes sections, document passages) and writes answers; it never
+# reads the database - the gateway retrieves and sends the passages in.
+
+TASK_EMBED_PASSAGES = "rmcollab.embed_passages"
+TASK_ASK_PREPARE = "rmcollab.ask_prepare"
+TASK_ASK_ANSWER = "rmcollab.ask_answer"
+QUEUE_ASK = "ask"
+QUEUE_EMBED = "embed"
+EMBEDDING_STREAM = "rmcollab:embeddings"
+ASK_CHANNEL_PREFIX = "rmcollab:ask:"
+EMBEDDING_MODEL = "snowflake/snowflake-arctic-embed-m"
+EMBEDDING_DIMENSIONS = 768
+
+AskReplyType = Literal["vectors", "delta", "done", "error"]
+
+
+def ask_channel(request_id: str) -> str:
+    return f"{ASK_CHANNEL_PREFIX}{request_id}"
+
+
+@dataclass(frozen=True)
+class EmbedItem:
+    id: str
+    text: str
+
+
+@dataclass(frozen=True)
+class EmbedPassagesTask:
+    items: list[EmbedItem]
+
+
+@dataclass(frozen=True)
+class EmbeddedVector:
+    id: str
+    vector: str
+
+
+@dataclass(frozen=True)
+class EmbeddingResult:
+    model: str
+    vectors: list[EmbeddedVector]
+
+
+@dataclass(frozen=True)
+class AskHistoryTurn:
+    question: str
+    answer: str
+
+
+@dataclass(frozen=True)
+class AskPrepareTask:
+    request_id: str
+    question: str
+    notes: list[EmbedItem]
+    history: list[AskHistoryTurn]
+
+
+@dataclass(frozen=True)
+class AskPassage:
+    n: int
+    source: str
+    text: str
+
+
+@dataclass(frozen=True)
+class AskAnswerTask:
+    request_id: str
+    question: str
+    passages: list[AskPassage]
+
+
+@dataclass(frozen=True)
+class AskReply:
+    type: AskReplyType
+    question: str | None = None
+    standalone: str | None = None
+    notes: list[EmbeddedVector] | None = None
+    text: str | None = None
+    model: str | None = None
+    code: str | None = None
+    message: str | None = None
+
+    def to_json(self) -> str:
+        # Absent, not null, for the optional fields: the gateway reads them as
+        # `string | undefined`.
+        return json.dumps({k: v for k, v in asdict(self).items() if v is not None})

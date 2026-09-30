@@ -23,8 +23,8 @@ async function createAndJoin(page: Page, name: string): Promise<string> {
   await page.getByRole("button", { name: /create session/i }).click();
   // The code arrives from an async request; a retrying assertion waits for it
   // where a plain inputValue() would read the still-empty field.
-  const codeField = page.getByPlaceholder("ABC123");
-  await expect(codeField).toHaveValue(/^[A-Z0-9]{6}$/);
+  const codeField = page.getByLabel("Session code");
+  await expect(codeField).toHaveValue(/^[A-Z0-9]{5}-[A-Z0-9]{5}$/);
   const code = await codeField.inputValue();
   await page.getByPlaceholder("Ada").fill(name);
   await page.getByRole("button", { name: /join session/i }).click();
@@ -37,7 +37,7 @@ async function createAndJoin(page: Page, name: string): Promise<string> {
 async function joinExisting(browser: Browser, code: string, name: string): Promise<Page> {
   const page = await (await browser.newContext()).newPage();
   await page.goto("/");
-  await page.getByPlaceholder("ABC123").fill(code);
+  await page.getByLabel("Session code").fill(code);
   await page.getByPlaceholder("Ada").fill(name);
   await page.getByRole("button", { name: /join session/i }).click();
   await expect(page.getByText("Main Room").first()).toBeVisible();
@@ -173,7 +173,10 @@ test("a recording opens as a searchable transcript tied to the player", async ({
   await page.getByRole("button", { name: "Library", exact: true }).click();
   await page.getByLabel(/search this room's documents/i).fill("action item");
   await expect(page.locator(".library-at")).toHaveText(/at 0:\d\d/);
-  await page.locator(".library-entry").first().click();
+  // The transcript's hit, the one with a time: the summary matches too (its
+  // "Action items" heading), and which ranks first is a tie that varies. Clicking
+  // "the first" sometimes opened the summary, with no line to find.
+  await page.locator(".library-entry", { has: page.locator(".library-at") }).first().click();
   await expect(page.locator(".transcript-lines li.is-target")).toContainText(/action item/i);
 
   expect(errors).toEqual([]);

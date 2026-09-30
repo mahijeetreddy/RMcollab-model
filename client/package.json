@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@rmcollab/shared": "*",
+    "@sentry/react": "^11.1.0",
     "@tiptap/core": "^3.31.3",
     "@tiptap/extension-collaboration": "^3.31.3",
     "@tiptap/extension-collaboration-caret": "^3.31.3",
@@ -25,6 +26,7 @@
     "@tiptap/starter-kit": "^3.31.3",
     "@tiptap/y-tiptap": "^3.0.9",
     "lib0": "^0.2.117",
+    "prosemirror-markdown": "^1.13.8",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "y-protocols": "^1.0.7",

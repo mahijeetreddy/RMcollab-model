@@ -1,4 +1,20 @@
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { expect, type Page } from "@playwright/test";
+
+const COMPOSE = fileURLToPath(new URL("../infra/docker-compose.yml", import.meta.url));
+
+/**
+ * Clears one of the gateway's per-address limits ("code-miss", "demo"). Tests
+ * all come from this machine's one address, so a limit a test uses up would
+ * otherwise refuse every later test, and every run in the next hour.
+ */
+export function clearLimit(kind: string): void {
+  execFileSync("docker", [
+    "compose", "-f", COMPOSE, "exec", "-T", "redis", "sh", "-c",
+    `redis-cli --scan --pattern "rmcollab:limit:${kind}:*" | xargs -r redis-cli DEL`,
+  ], { stdio: "ignore" });
+}
 
 export interface ToAdd {
   /** A fixture path; or leave out and give `text`. */
@@ -18,7 +34,10 @@ export interface ToAdd {
  * proposal, optionally override it, then click once to add them all.
  */
 export async function addToRoom(page: Page, items: ToAdd[]) {
-  const panel = page.locator(".add-media").first();
+  // In the feed the panel is behind a button once the feed has something in it.
+  const closed = page.locator('.feed-add[aria-expanded="false"]');
+  if (await closed.count()) await closed.click();
+  const panel = page.locator(".add-media:visible").first();
   for (const item of items) {
     if (item.file) {
       await panel.locator('input[type="file"]').setInputFiles(item.file);
@@ -43,4 +62,15 @@ export async function addToRoom(page: Page, items: ToAdd[]) {
   await panel.getByRole("button", { name: /to the room$/i }).click();
   // Each item confirms and then leaves the queue once the room has it.
   await expect(cards).toHaveCount(0, { timeout: 30_000 });
+}
+
+/**
+ * Notes opens on the room's documents; this opens the room's own notes (where
+ * uploads land) and waits until the editor has synced.
+ */
+export async function openRoomNotes(page: Page) {
+  const home = page.locator(".docs-home");
+  await expect(home.or(page.locator(".gdoc"))).toBeVisible();
+  if (await home.isVisible()) await page.locator(".doc-card.is-main .doc-card-open").click();
+  await expect(page.locator(".gdoc-save")).toContainText("Saved to the room");
 }

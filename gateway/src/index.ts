@@ -1,4 +1,7 @@
+// First, before anything it should watch loads.
+import { flushErrors } from "./instrument.js";
 import http from "node:http";
+import { Redis } from "ioredis";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { config } from "./config.js";
 import { migrate } from "./db/migrate.js";
@@ -17,14 +20,21 @@ import {
   strategiesRouter,
 } from "./http/routes/strategies.js";
 import { webhooksRouter } from "./http/routes/webhooks.js";
+import { backfillPassages, embeddingConsumer } from "./ask/indexer.js";
+import { closeAsk } from "./ask/service.js";
 import { jobEventConsumer } from "./jobs/eventConsumer.js";
+import { startLifecycle, stopLifecycle } from "./lifecycle.js";
+import { closeLimits } from "./limits.js";
+import { manageRouter } from "./http/routes/manage.js";
+import { versionsRouter } from "./http/routes/versions.js";
+import { documentsRouter } from "./http/routes/documents.js";
 import { closeWebhookQueue } from "./webhooks/queue.js";
 import { pubsub } from "./ws/pubsub.js";
 import { createWebSocketServer } from "./ws/server.js";
 
 function cors(_req: Request, res: Response, next: NextFunction): void {
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   next();
 }
@@ -32,12 +42,26 @@ function cors(_req: Request, res: Response, next: NextFunction): void {
 async function main(): Promise<void> {
   await migrate();
   // Off the boot path: indexing old documents must not delay taking traffic.
+  // Then split them for Ask the room: bodies first, since passages are made from them.
   void backfillArtifactBodies()
     .then((filled) => filled && console.log(`[library] indexed ${filled} existing documents`))
+    .then(async () => {
+      const backfillRedis = new Redis(config.redisUrl, { maxRetriesPerRequest: null });
+      try {
+        const { split, queued } = await backfillPassages(backfillRedis);
+        if (split || queued) console.log(`[ask] split ${split} passages, re-queued ${queued} for embedding`);
+      } finally {
+        backfillRedis.disconnect();
+      }
+    })
     .catch((err: unknown) => console.warn("[library] backfill failed", err));
 
   const app = express();
   app.disable("x-powered-by");
+  // One hop: the nginx load balancer, which sets X-Forwarded-For. Without this
+  // every request would appear to come from the balancer, and per-address
+  // limits (sample rooms) would be one shared allowance for the whole world.
+  app.set("trust proxy", Number(process.env.TRUSTED_PROXY_HOPS ?? 1));
   app.use(cors);
   app.options(/.*/, (_req, res) => res.sendStatus(204));
   app.use(express.json({ limit: "1mb" }));
@@ -48,6 +72,9 @@ async function main(): Promise<void> {
   app.use(strategiesRouter);
   app.use(metricsRouter);
   app.use(mediaRouter);
+  app.use(manageRouter);
+  app.use(versionsRouter);
+  app.use(documentsRouter);
   app.use(libraryRouter);
   app.use(webhooksRouter);
   app.use(filesRouter);
@@ -62,6 +89,8 @@ async function main(): Promise<void> {
   const server = http.createServer(app);
   const wss = createWebSocketServer(server);
   await jobEventConsumer.start();
+  await embeddingConsumer.start();
+  startLifecycle();
   startStrategyRefresh();
 
   await new Promise<void>((resolve) => server.listen(config.port, resolve));
@@ -78,6 +107,10 @@ async function main(): Promise<void> {
     await new Promise<void>((resolve) => server.close(() => resolve()));
 
     await jobEventConsumer.stop();
+    await embeddingConsumer.stop();
+    await closeAsk();
+    stopLifecycle();
+    await closeLimits();
     // Unsaved note edits (at most one batch window's worth) go to Postgres
     // before the pool closes.
     await docHub.flushAll().catch((err: unknown) => console.error("[docs] final flush failed", err));
@@ -86,6 +119,7 @@ async function main(): Promise<void> {
     await closeWebhookQueue();
     await pubsub.close();
     await pool.end();
+    await flushErrors();
     process.exit(0);
   };
 
@@ -95,5 +129,5 @@ async function main(): Promise<void> {
 
 main().catch((err: unknown) => {
   console.error("[gateway] boot failed", err);
-  process.exit(1);
+  void flushErrors().finally(() => process.exit(1));
 });

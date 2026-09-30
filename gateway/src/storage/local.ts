@@ -1,5 +1,5 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { mkdir, open, writeFile } from "node:fs/promises";
+import { mkdir, open, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { config } from "../config.js";
 
@@ -10,6 +10,10 @@ export interface StorageAdapter {
   publicUrl(relPath: string): string;
   /** Up to `maxBytes` of a stored file as UTF-8, or null if it cannot be read. */
   readText(relPath: string, maxBytes: number): Promise<string | null>;
+  /** Deletes a folder and everything in it; a missing folder is not an error. */
+  removeTree(relPath: string): Promise<void>;
+  /** The names of the folders directly inside `relPath`. */
+  listDirs(relPath: string): Promise<string[]>;
 }
 
 const root = path.resolve(config.storageRoot);
@@ -44,6 +48,22 @@ class LocalStorage implements StorageAdapter {
       return null;
     } finally {
       await handle?.close();
+    }
+  }
+
+  async removeTree(relPath: string): Promise<void> {
+    const absolute = this.resolve(relPath);
+    // Never the root itself, whatever relPath normalised to.
+    if (absolute === root) throw new Error("refusing to remove the storage root");
+    await rm(absolute, { recursive: true, force: true });
+  }
+
+  async listDirs(relPath: string): Promise<string[]> {
+    try {
+      const entries = await readdir(this.resolve(relPath), { withFileTypes: true });
+      return entries.filter((e) => e.isDirectory()).map((e) => e.name);
+    } catch {
+      return [];
     }
   }
 
@@ -89,3 +109,7 @@ export const originalPath = (roomId: string, mediaItemId: string, ext: string): 
 
 export const enhancedPath = (roomId: string, mediaItemId: string, ext: string): string =>
   `rooms/${roomId}/${mediaItemId}/enhanced.${ext}`;
+
+/** Everything one upload stored: its original, results and working files. */
+export const mediaFolder = (roomId: string, mediaItemId: string): string => `rooms/${roomId}/${mediaItemId}`;
+export const roomFolder = (roomId: string): string => `rooms/${roomId}`;

@@ -9,12 +9,14 @@ from functools import lru_cache
 from pathlib import Path
 from typing import get_args
 
-from workers.common.contracts import QUEUES, MediaType
+from workers.common.contracts import QUEUE_ASK, QUEUE_EMBED, QUEUES, MediaType
 
 log = logging.getLogger(__name__)
 
 MEDIA_TYPES: tuple[MediaType, ...] = get_args(MediaType)
 _QUEUE_TO_MEDIA: dict[str, MediaType] = {queue: media for media, queue in QUEUES.items()}
+# Queues that carry no media: Ask the room's embedding and answering.
+_NON_MEDIA_QUEUES = frozenset({QUEUE_ASK, QUEUE_EMBED})
 
 DEFAULT_REDIS_URL = "redis://localhost:6379/0"
 DEFAULT_STORAGE_ROOT = "/data/storage"
@@ -70,7 +72,7 @@ def _env_queues(name: str) -> tuple[str, ...]:
     if not raw:
         return tuple(QUEUES.values())
     queues = tuple(dict.fromkeys(part.strip() for part in raw.split(",") if part.strip()))
-    unknown = [q for q in queues if q not in _QUEUE_TO_MEDIA]
+    unknown = [q for q in queues if q not in _QUEUE_TO_MEDIA and q not in _NON_MEDIA_QUEUES]
     if unknown:
         log.warning("%s contains queues with no media type mapping: %s", name, unknown)
     return queues or tuple(QUEUES.values())

@@ -1,0 +1,9 @@
+Week 6 planning meeting
+
+We compared Kafka and Redis Streams for the job pipeline. We decided on Redis Streams: it is already running for pub/sub, and nobody wants to operate ZooKeeper for a class project. We will revisit this only if we need replay beyond a few days.
+
+Priya will write the consumer groups section of the report by Friday. Marcus will rerun the benchmark with three workers and post the numbers in the room.
+
+Open question: whether exactly-once delivery is achievable. For now we accept at-least-once delivery with idempotent handlers.
+
+The midterm is on the twelfth and covers everything up to consensus. It is open notes.

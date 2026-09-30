@@ -83,6 +83,10 @@ class ImageNotes(BaseEnhancer):
     def available(cls) -> bool:
         return llm.vision_available()
 
+    @classmethod
+    def unavailable_reason(cls) -> str:
+        return llm.unavailable_reason(llm.VISION)
+
     def enhance(
         self,
         input_path: Path,

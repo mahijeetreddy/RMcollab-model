@@ -3,6 +3,7 @@ import { JOB_EVENT_STREAM } from "@rmcollab/shared";
 import { Redis } from "ioredis";
 import { config } from "../config.js";
 import { getArtifactTexts, getMediaItem, updateJobFromEvent } from "../db/repositories.js";
+import { indexJob } from "../ask/indexer.js";
 import { notesWriter } from "../notes/index.js";
 import { pubsub } from "../ws/pubsub.js";
 
@@ -112,6 +113,11 @@ export class JobEventConsumer {
     if (job.status === "done" || job.status === "failed") {
       const item = await getMediaItem(job.mediaItemId);
       if (item) await notesWriter.finished(item, job, await getArtifactTexts(job.id));
+      // Its documents become passages for Ask the room. Off this loop's path:
+      // embedding is a worker's job, and a slow split must not hold up events.
+      if (job.status === "done") {
+        void indexJob(job.id).catch((err: unknown) => console.error("[ask] indexing failed", job.id, err));
+      }
     }
   }
 

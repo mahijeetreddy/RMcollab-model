@@ -162,7 +162,7 @@ describe("isServerEvent: structural failures", () => {
   });
 
   it("rejects an unknown event type, a missing type, and non-object frames", () => {
-    expect(isServerEvent({ type: "room_deleted", roomId: "r-1" })).toBe(false);
+    expect(isServerEvent({ type: "room_teleported", roomId: "r-1" })).toBe(false);
     expect(isServerEvent(without(valid.error!, "type"))).toBe(false);
     expect(isServerEvent(null)).toBe(false);
     expect(isServerEvent([valid.error])).toBe(false);

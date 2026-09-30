@@ -94,6 +94,10 @@ export function RoomSwitcher({
         <RevealCode roomId={activeRoom.id} participantId={meId} />
       )}
 
+      {activeRoom && !activeRoom.isMain && activeRoom.ownerId === meId && meId && (
+        <DeleteRoom room={activeRoom} participantId={meId} />
+      )}
+
       {lockedRoomId && (
         <form
           className="room-code-form"
@@ -195,6 +199,56 @@ function RevealCode({ roomId, participantId }: { roomId: string; participantId: 
       {error && (
         <p className="error-text" role="alert">
           <span aria-hidden="true">✕</span>
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The owner's way to remove a breakout room, with a confirmation that says
+ * what goes with it. Everyone inside is moved to the main room.
+ */
+function DeleteRoom({ room, participantId }: { room: Room; participantId: string }) {
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const remove = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.deleteRoom(room.id, participantId);
+    } catch (cause) {
+      setError(cause instanceof ApiError ? cause.message : "Could not delete the room");
+      setBusy(false);
+    }
+  };
+
+  if (!confirming) {
+    return (
+      <button type="button" className="ghost room-delete" onClick={() => setConfirming(true)}>
+        Delete this room
+      </button>
+    );
+  }
+  return (
+    <div className="room-delete-confirm" role="alertdialog" aria-label={`Delete ${room.name}?`}>
+      <p>
+        Delete <strong>{room.name}</strong> for everyone? Its notes, uploads and chat go too, and anyone in it moves to
+        the main room.
+      </p>
+      <div className="job-confirm-actions">
+        <button type="button" className="ghost" onClick={() => setConfirming(false)} disabled={busy}>
+          Cancel
+        </button>
+        <button type="button" className="danger" onClick={() => void remove()} disabled={busy} autoFocus>
+          {busy ? "Deleting…" : "Delete room"}
+        </button>
+      </div>
+      {error && (
+        <p className="error-text" role="alert">
           {error}
         </p>
       )}

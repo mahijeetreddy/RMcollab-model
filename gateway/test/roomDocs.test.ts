@@ -163,11 +163,12 @@ describe("RoomDocHub", () => {
   });
 
   it("gives a late joiner the whole document", async () => {
-    const { hubs } = cluster(2);
+    const { hubs, store } = cluster(2);
     const alice = new Client("alice", hubs[0]!);
     await alice.connect();
     alice.type(0, "written before bob arrived");
-    await new Promise((resolve) => setTimeout(resolve, 60));
+    // Waited for, not guessed at with a fixed delay, which a busy machine outlasts.
+    await vi.waitFor(() => expect(store.text()).toBe("written before bob arrived"), { timeout: 2000, interval: 10 });
 
     const bob = new Client("bob", hubs[1]!);
     await bob.connect();
@@ -189,8 +190,7 @@ describe("RoomDocHub", () => {
     const bob = new Client("bob", hubs[1]!);
     await bob.connect();
     expect(bob.text).toBe("");
-    await new Promise((resolve) => setTimeout(resolve, 120));
-    expect(bob.text).toBe("in flight");
+    await vi.waitFor(() => expect(bob.text).toBe("in flight"), { timeout: 2000, interval: 10 });
   });
 
   it("batches keystrokes into far fewer stored rows", async () => {
@@ -198,9 +198,8 @@ describe("RoomDocHub", () => {
     const alice = new Client("alice", hubs[0]!);
     await alice.connect();
     for (const ch of "a sentence typed one key at a time") alice.type(alice.text.length, ch);
-    await new Promise((resolve) => setTimeout(resolve, 60));
+    await vi.waitFor(() => expect(store.text()).toBe("a sentence typed one key at a time"), { timeout: 2000, interval: 10 });
     expect(store.appends).toBeLessThanOrEqual(2);
-    expect(store.text()).toBe("a sentence typed one key at a time");
   });
 
   it("persists each edit once, not once per replica", async () => {
@@ -208,8 +207,9 @@ describe("RoomDocHub", () => {
     const clients = hubs.map((hub, i) => new Client(`c${i}`, hub));
     for (const c of clients) await c.connect();
     clients[0]!.type(0, "once");
+    await vi.waitFor(() => expect(store.text()).toBe("once"), { timeout: 2000, interval: 10 });
+    // Then a little longer: a duplicate save from another replica would land by now.
     await new Promise((resolve) => setTimeout(resolve, 60));
-    expect(store.text()).toBe("once");
     expect(store.appends).toBe(1);
   });
 
@@ -232,16 +232,14 @@ describe("RoomDocHub", () => {
     await alice.connect();
     store.failNext = true;
     alice.type(0, "unsaved at first");
-    await new Promise((resolve) => setTimeout(resolve, 80));
-    expect(store.text()).toBe("unsaved at first"); // retried after the failure
+    await vi.waitFor(() => expect(store.text()).toBe("unsaved at first"), { timeout: 2000, interval: 10 }); // retried after the failure
 
     // A replica that never saw it: alice resyncs and the edit comes back.
     const second = cluster(1, new MemoryStore());
     const reconnect = new Client("alice", second.hubs[0]!);
     Y.applyUpdate(reconnect.doc, Y.encodeStateAsUpdate(alice.doc));
     await reconnect.connect();
-    await new Promise((resolve) => setTimeout(resolve, 60));
-    expect(second.store.text()).toBe("unsaved at first");
+    await vi.waitFor(() => expect(second.store.text()).toBe("unsaved at first"), { timeout: 2000, interval: 10 });
   });
 
   it("drops a document it no longer receives updates for, after saving it", async () => {
@@ -253,6 +251,28 @@ describe("RoomDocHub", () => {
     await hubs[0]!.drop(ROOM);
     expect(hubs[0]!.isLoaded(ROOM)).toBe(false);
     expect(store.text()).toBe("keep me");
+  });
+
+  it("retries the final save when its last editor leaves during a database blip", async () => {
+    const { hubs, store } = cluster(1);
+    const alice = new Client("alice", hubs[0]!);
+    await alice.connect();
+    alice.type(0, "last words");
+    store.failNext = true;
+    hubs[0]!.leave(ROOM, "alice");
+    await hubs[0]!.drop(ROOM);
+    expect(store.text()).toBe("last words");
+  });
+
+  it("discards a deleted document without saving what it held", async () => {
+    const { hubs, store } = cluster(1);
+    const alice = new Client("alice", hubs[0]!);
+    await alice.connect();
+    alice.type(0, "in a document being deleted");
+    hubs[0]!.discard(ROOM);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(hubs[0]!.isLoaded(ROOM)).toBe(false);
+    expect(store.appends).toBe(0);
   });
 
   it("shows a collaborator's presence across replicas and removes it when they leave", async () => {

@@ -72,6 +72,9 @@ class StrategyInfo:
     media_type: MediaType
     is_default: bool
     available: bool
+    # Why it cannot run, for a person ("image reading is paused until
+    # tomorrow"); empty while it can.
+    unavailable_reason: str = ""
     # Declared with @register(default=True), as opposed to a pool falling back to
     # whatever it has. The gateway merges adverts from every pool and uses this
     # to pick one default per media type: declared beats fallen-back.
@@ -95,6 +98,11 @@ class BaseEnhancer(ABC):
         """Read input_path, write output_path, call progress(0..1, message) as you go."""
 
     @classmethod
+    def unavailable_reason(cls) -> str:
+        """Why available() is False, in words for a person. Override where it can say more."""
+        return ""
+
+    @classmethod
     def available(cls) -> bool:
         """False when a prerequisite is missing (API key, model weights, GPU).
 
@@ -111,7 +119,8 @@ class BaseEnhancer(ABC):
             description=cls.description,
             media_type=cls.media_type,
             is_default=_resolve_default_name(cls.media_type) == cls.name,
-            available=cls.available(),
+            available=(ok := cls.available()),
+            unavailable_reason="" if ok else (cls.unavailable_reason() or "it is not configured on this worker"),
             explicit_default=_EXPLICIT_DEFAULTS.get(cls.media_type) == cls.name,
         )
 
@@ -323,7 +332,7 @@ def resolve_strategy(media_type: MediaType, requested: str | None) -> StrategyRe
                 enhancer=default_strategy(media_type)(),
                 requested=want,
                 fell_back=True,
-                reason=f"{want!r} is not configured on this worker",
+                reason=cls.unavailable_reason() or f"{want!r} is not configured on this worker",
             )
         return StrategyResolution(enhancer=cls(), requested=want, fell_back=False)
 

@@ -1,0 +1,3 @@
+[00:00:00] Welcome to the Distributed Systems Seminar.
+[00:00:03] Today we will discuss message queues, worker pools, and how to scale a gateway horizontally.
+[00:00:09] The action item for next week is to red chapter 4 before the group meets again.

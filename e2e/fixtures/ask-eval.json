@@ -1,0 +1,287 @@
+{
+  "about": "A labelled question set for Ask the room's retrieval. One study group's material - lecture transcript lines, a summary, meeting documents and notes, with off-topic distractors - and questions whose answer is in a known passage. Many questions are paraphrases sharing no words with their answer, which is what keyword search misses; a few are exact identifiers (a command, a course code, a config value), which is what embeddings can blur. Used to choose the embedding model and to guard retrieval quality in tests. `followUps` are questions that only make sense after an earlier turn (\"when is that due?\"); each carries that turn as history.",
+  "passages": [
+    {
+      "id": "T1",
+      "kind": "transcript",
+      "text": "Welcome back. Today we're looking at how the gateway scales horizontally behind the load balancer, and why every replica has to be stateless."
+    },
+    {
+      "id": "T2",
+      "kind": "transcript",
+      "text": "Each replica keeps its websocket connections in memory, but anything shared, like which room a message goes to, lives in Redis pub/sub so every replica hears it."
+    },
+    {
+      "id": "T3",
+      "kind": "transcript",
+      "text": "When a job finishes, the worker writes an event to a Redis stream, and exactly one gateway picks it up through a consumer group."
+    },
+    {
+      "id": "T4",
+      "kind": "transcript",
+      "text": "If a worker dies halfway through, acks late means the job goes back on the queue and another worker takes it."
+    },
+    {
+      "id": "T5",
+      "kind": "transcript",
+      "text": "For the project we compared Kafka and Redis Streams. Kafka has better retention, but we would have to run ZooKeeper or KRaft, and nobody wants to operate that for a class project."
+    },
+    {
+      "id": "T6",
+      "kind": "transcript",
+      "text": "So the decision is Redis Streams, and we revisit it if we ever need replay beyond a few days."
+    },
+    {
+      "id": "T7",
+      "kind": "transcript",
+      "text": "Exactly-once delivery came up again. The honest answer is we get at-least-once plus idempotent handlers, which is what most real systems do."
+    },
+    {
+      "id": "T8",
+      "kind": "transcript",
+      "text": "Next week's reading is chapter four of Designing Data-Intensive Applications, the part on encoding and evolution."
+    },
+    {
+      "id": "T9",
+      "kind": "transcript",
+      "text": "The midterm is on the twelfth, it covers everything up to consensus, and it's open notes."
+    },
+    {
+      "id": "S1",
+      "kind": "summary",
+      "text": "Key points\n\nStateless gateways behind a load balancer. Redis pub/sub for room fan-out. Redis Streams consumer groups for job events."
+    },
+    {
+      "id": "S2",
+      "kind": "summary",
+      "text": "Action items\n\nPriya writes the consumer groups section of the report by Friday. Marcus reruns the benchmark with three workers and posts the numbers."
+    },
+    {
+      "id": "D1",
+      "kind": "document",
+      "text": "Budget for the cloud credits is 50 dollars; we will turn the cluster off every night to stay under it."
+    },
+    {
+      "id": "D2",
+      "kind": "document",
+      "text": "Marcus measured a p95 latency of 180 milliseconds at 500 concurrent sockets on two replicas."
+    },
+    {
+      "id": "N1",
+      "kind": "notes",
+      "text": "Open questions\n\nDoes the load balancer need sticky sessions for websockets? No - the upgrade pins the connection to one replica."
+    },
+    {
+      "id": "N2",
+      "kind": "notes",
+      "text": "Glossary\n\nBackpressure: slowing producers down when consumers can't keep up."
+    },
+    {
+      "id": "N3",
+      "kind": "notes",
+      "text": "Photosynthesis lab write-up is due Monday for the biology group."
+    },
+    {
+      "id": "N4",
+      "kind": "notes",
+      "text": "Office hours moved to Thursday at 3pm in room 204."
+    },
+    {
+      "id": "X1",
+      "kind": "transcript",
+      "text": "To recover messages a crashed consumer never acknowledged, run XAUTOCLAIM with a minimum idle time of thirty seconds."
+    },
+    {
+      "id": "X2",
+      "kind": "notes",
+      "text": "Deadlines\n\nCS-451 HW3 is due October 3. The CS-452 project proposal is due October 10."
+    },
+    {
+      "id": "X3",
+      "kind": "document",
+      "text": "Benchmark config: gateway replicas=2, worker concurrency=4, Redis maxmemory 512mb with allkeys-lru."
+    }
+  ],
+  "questions": [
+    {
+      "q": "Which message broker did we pick?",
+      "gold": [
+        "T6",
+        "T5"
+      ]
+    },
+    {
+      "q": "Why didn't we go with Kafka?",
+      "gold": [
+        "T5"
+      ]
+    },
+    {
+      "q": "Who is writing the consumer groups part?",
+      "gold": [
+        "S2"
+      ]
+    },
+    {
+      "q": "Who is rerunning the benchmark?",
+      "gold": [
+        "S2"
+      ]
+    },
+    {
+      "q": "How fast was the system under load?",
+      "gold": [
+        "D2"
+      ]
+    },
+    {
+      "q": "When is the exam?",
+      "gold": [
+        "T9"
+      ]
+    },
+    {
+      "q": "Is the test open book?",
+      "gold": [
+        "T9"
+      ]
+    },
+    {
+      "q": "What should I read before next week?",
+      "gold": [
+        "T8"
+      ]
+    },
+    {
+      "q": "Can we guarantee each message is processed only once?",
+      "gold": [
+        "T7"
+      ]
+    },
+    {
+      "q": "What happens if a worker crashes mid-job?",
+      "gold": [
+        "T4"
+      ]
+    },
+    {
+      "q": "How do messages reach everyone in a room across servers?",
+      "gold": [
+        "T2",
+        "S1"
+      ]
+    },
+    {
+      "q": "How much money can we spend on cloud?",
+      "gold": [
+        "D1"
+      ]
+    },
+    {
+      "q": "What's the plan to stay within budget?",
+      "gold": [
+        "D1"
+      ]
+    },
+    {
+      "q": "Do websockets require sticky sessions?",
+      "gold": [
+        "N1"
+      ]
+    },
+    {
+      "q": "What is backpressure?",
+      "gold": [
+        "N2"
+      ]
+    },
+    {
+      "q": "Where are office hours now?",
+      "gold": [
+        "N4"
+      ]
+    },
+    {
+      "q": "How are finished jobs delivered to the gateway?",
+      "gold": [
+        "T3",
+        "S1"
+      ]
+    },
+    {
+      "q": "ZooKeeper",
+      "gold": [
+        "T5"
+      ]
+    },
+    {
+      "q": "XAUTOCLAIM",
+      "gold": [
+        "X1"
+      ]
+    },
+    {
+      "q": "When is HW3 for CS-451 due?",
+      "gold": [
+        "X2"
+      ]
+    },
+    {
+      "q": "What eviction policy did the benchmark use?",
+      "gold": [
+        "X3"
+      ]
+    }
+  ],
+  "followUps": [
+    {
+      "history": [
+        {
+          "question": "Who is writing the consumer groups part?",
+          "answer": "Priya writes the consumer groups section of the report."
+        }
+      ],
+      "q": "When is that due?",
+      "gold": [
+        "S2"
+      ]
+    },
+    {
+      "history": [
+        {
+          "question": "Which message broker did we pick?",
+          "answer": "Redis Streams."
+        }
+      ],
+      "q": "Why not the other one?",
+      "gold": [
+        "T5"
+      ]
+    },
+    {
+      "history": [
+        {
+          "question": "When is the exam?",
+          "answer": "The midterm is on the twelfth."
+        }
+      ],
+      "q": "What does it cover?",
+      "gold": [
+        "T9"
+      ]
+    },
+    {
+      "history": [
+        {
+          "question": "What happens if a worker crashes mid-job?",
+          "answer": "With acks late, the job goes back on the queue and another worker takes it."
+        }
+      ],
+      "q": "And how do finished ones reach the gateway?",
+      "gold": [
+        "T3",
+        "S1"
+      ]
+    }
+  ]
+}

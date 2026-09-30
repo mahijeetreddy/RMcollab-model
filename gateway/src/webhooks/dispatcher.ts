@@ -1,3 +1,5 @@
+// First, before anything it should watch loads.
+import { flushErrors } from "../instrument.js";
 import type { JobEvent, WebhookEventPayload, WebhookEventType } from "@rmcollab/shared";
 import { JOB_EVENT_STREAM } from "@rmcollab/shared";
 import { Redis } from "ioredis";
@@ -150,6 +152,7 @@ async function main(): Promise<void> {
     await dispatcher.stop();
     await closeWebhookQueue();
     await pool.end();
+    await flushErrors();
     process.exit(0);
   };
 
@@ -159,5 +162,5 @@ async function main(): Promise<void> {
 
 main().catch((err: unknown) => {
   console.error("[webhooks] boot failed", err);
-  process.exit(1);
+  void flushErrors().finally(() => process.exit(1));
 });

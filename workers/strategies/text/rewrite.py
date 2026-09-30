@@ -47,6 +47,10 @@ class LLMRewrite(BaseEnhancer):
     def available(cls) -> bool:
         return llm.available(llm.REWRITE)
 
+    @classmethod
+    def unavailable_reason(cls) -> str:
+        return llm.unavailable_reason(llm.REWRITE)
+
     def enhance(
         self,
         input_path: Path,

@@ -4,10 +4,9 @@ dist/
 build/
 *.tsbuildinfo
 
-# Secrets: every .env variant, but keep the documented template.
+# Secrets: every .env variant.
 .env
 .env.*
-!.env.example
 
 # Python
 __pycache__/

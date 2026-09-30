@@ -30,7 +30,7 @@ import threading
 import time
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, Callable, TypeVar
+from typing import Any, Callable, Iterator, TypeVar
 
 log = logging.getLogger(__name__)
 
@@ -42,6 +42,9 @@ SUMMARY = "summary"
 # Reading images. Its own profile because the text model is often not a vision
 # model (Groq's gpt-oss is not), so images can go to a different provider.
 VISION = "vision"
+# Answering a question about a room's material. Someone is watching the answer
+# appear, so this wants the fastest model that follows citation rules well.
+ASK = "ask"
 
 DEFAULT_ANTHROPIC_MODEL = "claude-opus-5"
 # Reasoning models spend part of this budget thinking before they write the
@@ -68,6 +71,9 @@ DAILY_QUOTA = re.compile(r"per ?day|daily|\bRPD\b|\bTPD\b", re.IGNORECASE)
 # Holding it longer keeps the connection warm between bursts; if the server has
 # closed it meanwhile, the call reconnects (and a failure there is retried).
 KEEPALIVE_S = 120.0
+# A streamed answer that has not finished in this long is abandoned; the asker
+# has been told something went wrong well before then.
+STREAM_TIMEOUT_S = 60.0
 WARMUP_TIMEOUT_S = 10.0
 
 T = TypeVar("T")
@@ -75,6 +81,24 @@ T = TypeVar("T")
 
 class LLMUnavailable(RuntimeError):
     """No provider is configured, or the configured one rejected us."""
+
+
+def _check_budget(task: str | None) -> None:
+    """Counts a call against the task's daily budget; a spent budget is unavailability."""
+    from workers.common import budget
+
+    try:
+        budget.spend(task)
+    except budget.BudgetExhausted as exc:
+        raise LLMUnavailable(str(exc)) from exc
+
+
+def _note_daily_quota(task: str | None, exc: BaseException) -> None:
+    """A provider's own daily cap reached: pause the task until tomorrow, cluster-wide."""
+    if getattr(exc, "status_code", None) == 429 and DAILY_QUOTA.search(str(exc)):
+        from workers.common import budget
+
+        budget.mark_exhausted(task)
 
 
 @dataclass(frozen=True)
@@ -148,6 +172,15 @@ def model_name(task: str | None = None) -> str:
 
 
 def available(task: str | None = None) -> bool:
+    """Configured, and today's budget not spent."""
+    from workers.common import budget
+
+    if budget.exhausted(task):
+        return False
+    return configured(task)
+
+
+def configured(task: str | None = None) -> bool:
     which = provider(task)
     if which == ANTHROPIC:
         return importlib.util.find_spec("anthropic") is not None
@@ -164,12 +197,31 @@ def vision_available() -> bool:
     LLM_MODEL is usually a text model, and sending it an image fails the job
     rather than falling back.
     """
+    from workers.common import budget
+
+    return vision_configured() and not budget.exhausted(VISION)
+
+
+def vision_configured() -> bool:
     which = provider(VISION)
     if which == ANTHROPIC:
-        return available(VISION)
+        return configured(VISION)
     if which == OPENAI_COMPATIBLE:
-        return bool(_env("LLM_VISION_MODEL")) and available(VISION)
+        return bool(_env("LLM_VISION_MODEL")) and configured(VISION)
     return False
+
+
+def unavailable_reason(task: str | None = None) -> str:
+    """Why a task cannot run right now, in words for a person; empty if it can."""
+    from workers.common import budget
+
+    if task == VISION and not vision_configured():
+        return "no image-reading model is configured"
+    if task != VISION and not configured(task):
+        return "no language model is configured"
+    if budget.exhausted(task):
+        return budget.paused_reason(task)
+    return ""
 
 
 def describe(task: str | None = None) -> str:
@@ -221,7 +273,7 @@ def reset_clients() -> None:
     _anthropic_client.cache_clear()
 
 
-def warm(tasks: tuple[str | None, ...] = (None, REWRITE, SUMMARY), *, block: bool = False) -> threading.Thread | None:
+def warm(tasks: tuple[str | None, ...] = (None, REWRITE, SUMMARY, ASK), *, block: bool = False) -> threading.Thread | None:
     """Import the SDK and open a connection before the first job needs it.
 
     A new pool process otherwise pays SDK import plus a TLS handshake on its first
@@ -232,7 +284,7 @@ def warm(tasks: tuple[str | None, ...] = (None, REWRITE, SUMMARY), *, block: boo
     endpoints = {
         (setting("BASE_URL", task), setting("API_KEY", task))
         for task in tasks
-        if provider(task) == OPENAI_COMPATIBLE and available(task)
+        if provider(task) == OPENAI_COMPATIBLE and configured(task)
     }
     if not endpoints:
         return None
@@ -439,12 +491,108 @@ def complete(
 ) -> LLMResult:
     which = provider(task)
     max_tokens = max_tokens or max_output_tokens(task)
+    if which in (ANTHROPIC, OPENAI_COMPATIBLE):
+        if which == OPENAI_COMPATIBLE and not model_name(task):
+            raise LLMUnavailable("LLM_MODEL is not set for the OpenAI-compatible provider")
+        _check_budget(task)
+        try:
+            if which == ANTHROPIC:
+                return _complete_anthropic(system, user, max_tokens, images)
+            return _complete_openai(system, user, max_tokens, task, images)
+        except Exception as exc:
+            _note_daily_quota(task, exc.__cause__ or exc)
+            raise
+    raise LLMUnavailable(
+        "no language model configured: set ANTHROPIC_API_KEY, or LLM_BASE_URL + "
+        "LLM_API_KEY + LLM_MODEL for an OpenAI-compatible endpoint"
+    )
+
+
+# --- streaming -----------------------------------------------------------------
+#
+# For answers someone watches being written. Retries cover only the request
+# itself - a 429 or 503 before anything arrives. Once text has been handed to
+# the caller it may already be on a screen, so a failure after that is raised
+# rather than silently restarted, which would repeat what was shown.
+
+
+def _stream_anthropic(system: str, user: str, max_tokens: int) -> Iterator[str]:
+    import anthropic
+
+    client = _anthropic_client().with_options(timeout=STREAM_TIMEOUT_S)
+    try:
+        with client.messages.stream(
+            model=model_name(),
+            max_tokens=max_tokens,
+            system=system,
+            output_config={"effort": _env("CLAUDE_EFFORT") or "low"},
+            messages=[{"role": "user", "content": user}],
+        ) as stream:
+            yield from stream.text_stream
+    except anthropic.AuthenticationError as exc:
+        raise LLMUnavailable("Anthropic rejected the configured credentials") from exc
+    except anthropic.APIStatusError as exc:
+        raise RuntimeError(f"Anthropic error {exc.status_code}: {exc.message}") from exc
+    except anthropic.APIConnectionError as exc:
+        raise RuntimeError("could not reach the Anthropic API") from exc
+
+
+def _stream_openai(system: str, user: str, max_tokens: int, task: str | None) -> Iterator[str]:
+    base_url = setting("BASE_URL", task)
+    client = _openai_client(base_url, setting("API_KEY", task)).with_options(timeout=STREAM_TIMEOUT_S)
+    extra: dict[str, Any] = {}
+    effort = reasoning_effort(task)
+    if effort:
+        extra["reasoning_effort"] = effort
+    try:
+        # create() returns once the response headers arrive, so an HTTP error
+        # (the retryable kind) surfaces here, inside the retry.
+        response = with_retries(
+            lambda: client.chat.completions.create(
+                model=model_name(task),
+                max_tokens=max_tokens,
+                stream=True,
+                messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
+                **extra,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - one error shape whatever the gateway
+        raise RuntimeError(f"{base_url} rejected the request: {exc}") from exc
+
+    wrote = False
+    finish = None
+    for chunk in response:
+        choice = chunk.choices[0] if chunk.choices else None
+        if choice is None:
+            continue
+        finish = choice.finish_reason or finish
+        # Reasoning models stream their thinking in a separate field; only the
+        # answer itself is passed on.
+        piece = getattr(choice.delta, "content", None)
+        if piece:
+            wrote = True
+            yield piece
+    if not wrote:
+        if finish == "length":
+            raise RuntimeError(
+                f"the model used all {max_tokens} output tokens before answering; "
+                "raise LLM_ASK_MAX_TOKENS for reasoning models"
+            )
+        raise RuntimeError("the model returned no text")
+
+
+def stream(system: str, user: str, *, max_tokens: int | None = None, task: str | None = None) -> Iterator[str]:
+    """Yields the answer in pieces as the model writes it."""
+    which = provider(task)
+    max_tokens = max_tokens or max_output_tokens(task)
     if which == ANTHROPIC:
-        return _complete_anthropic(system, user, max_tokens, images)
+        _check_budget(task)
+        return _stream_anthropic(system, user, max_tokens)
     if which == OPENAI_COMPATIBLE:
         if not model_name(task):
             raise LLMUnavailable("LLM_MODEL is not set for the OpenAI-compatible provider")
-        return _complete_openai(system, user, max_tokens, task, images)
+        _check_budget(task)
+        return _stream_openai(system, user, max_tokens, task)
     raise LLMUnavailable(
         "no language model configured: set ANTHROPIC_API_KEY, or LLM_BASE_URL + "
         "LLM_API_KEY + LLM_MODEL for an OpenAI-compatible endpoint"

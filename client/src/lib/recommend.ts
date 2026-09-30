@@ -121,6 +121,7 @@ export function recommend(detected: Detected, strategies: StrategyDescriptor[]):
 }
 
 function unavailableWhy(s: StrategyDescriptor): string {
+  if (s.unavailableReason) return s.unavailableReason;
   if (s.mediaType === "image" && s.name === "notes") return "no image-reading model is configured";
   if (s.name === "summarise" || s.name === "rewrite") return "no language model is configured";
   return "the worker for it is not running";

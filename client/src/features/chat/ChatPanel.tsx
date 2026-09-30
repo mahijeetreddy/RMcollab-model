@@ -10,6 +10,9 @@ interface Props {
   onSend: (body: string) => boolean;
   typing: Record<string, { displayName: string; at: number }>;
   onTyping: (isTyping: boolean) => void;
+  /** Controlled by the room, which keeps one dock (chat or Ask) open at a time. */
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
 }
 
 function typingLabel(names: string[]): string {
@@ -18,9 +21,8 @@ function typingLabel(names: string[]): string {
   return `${names[0]} and ${names.length - 1} others are typing`;
 }
 
-export function ChatPanel({ messages, meId, canSend, onSend, typing, onTyping }: Props) {
+export function ChatPanel({ messages, meId, canSend, onSend, typing, onTyping, open, onOpenChange }: Props) {
   const [draft, setDraft] = useState("");
-  const [open, setOpen] = useState(false);
   const [unread, setUnread] = useState(0);
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
@@ -106,11 +108,11 @@ export function ChatPanel({ messages, meId, canSend, onSend, typing, onTyping }:
   };
 
   return (
-    <div className={open ? "chat-dock is-open" : "chat-dock"}>
+    <div className={open ? "dock chat-dock is-open" : "dock chat-dock"}>
       <button
         type="button"
         className={unread > 0 && !open ? "chat-toggle has-unread" : "chat-toggle"}
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => onOpenChange(!open)}
         aria-expanded={open}
         aria-controls="chat-popover"
       >
@@ -142,7 +144,7 @@ export function ChatPanel({ messages, meId, canSend, onSend, typing, onTyping }:
         <button
           type="button"
           className="chat-close"
-          onClick={() => setOpen(false)}
+          onClick={() => onOpenChange(false)}
           aria-label="Close chat"
         >
           <span aria-hidden="true">✕</span>

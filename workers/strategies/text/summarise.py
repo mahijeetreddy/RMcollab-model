@@ -236,6 +236,10 @@ class Summarise(BaseEnhancer):
     def available(cls) -> bool:
         return llm.available(llm.SUMMARY)
 
+    @classmethod
+    def unavailable_reason(cls) -> str:
+        return llm.unavailable_reason(llm.SUMMARY)
+
     def enhance(
         self,
         input_path: Path,

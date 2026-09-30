@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import type { ClientEvent, ServerEvent } from "@rmcollab/shared";
+import type { AskHistoryTurn, ClientEvent, ServerEvent } from "@rmcollab/shared";
+import { MAIN_DOC_ID } from "@rmcollab/shared/notes";
 import { GATEWAY_WS } from "../api/client";
 import { describeFrame, isServerEvent } from "../lib/guards";
 import { initialRoomState, roomReducer, type RoomState } from "../state/roomReducer";
@@ -9,6 +10,8 @@ export type ConnectionStatus = "connecting" | "online" | "reconnecting" | "offli
 export interface Credentials {
   sessionCode: string;
   displayName: string;
+  /** Rejoin as this person (from a reload or Recent sessions), keeping what they own. */
+  participantId?: string;
 }
 
 export interface Realtime {
@@ -22,15 +25,21 @@ export interface Realtime {
   reconnectNow: () => void;
   clearError: () => void;
   /** Sends one shared-notes frame (base64 y-protocols) for the current room. */
-  sendDoc: (roomId: string, data: string) => boolean;
+  sendDoc: (roomId: string, data: string, docId?: string) => boolean;
   /**
    * Shared-notes frames bypass the reducer: they arrive per keystroke, and the
    * editor's CRDT - not React state - is where the document lives.
    */
   subscribeDoc: (listener: DocListener) => () => void;
+  /** Asks a question about the current room; the reply streams to `subscribeAsk` listeners. */
+  sendAsk: (roomId: string, requestId: string, question: string, history?: AskHistoryTurn[]) => boolean;
+  /** Ask replies bypass the reducer too: they are private and arrive in pieces. */
+  subscribeAsk: (listener: AskListener) => () => void;
 }
 
-export type DocListener = (roomId: string, data: string) => void;
+export type DocListener = (roomId: string, data: string, docId: string) => void;
+export type AskEvent = Extract<ServerEvent, { type: "ask_sources" | "ask_delta" | "ask_done" }>;
+export type AskListener = (event: AskEvent) => void;
 
 const BASE_BACKOFF_MS = 500;
 const MAX_BACKOFF_MS = 15_000;
@@ -70,6 +79,7 @@ export function useRealtime(credentials: Credentials | null): Realtime {
 
   const socketRef = useRef<WebSocket | null>(null);
   const docListenersRef = useRef(new Set<DocListener>());
+  const askListenersRef = useRef(new Set<AskListener>());
   const attemptRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
   const heartbeatTimerRef = useRef<number | null>(null);
@@ -84,6 +94,9 @@ export function useRealtime(credentials: Credentials | null): Realtime {
 
   const sessionCode = credentials?.sessionCode ?? null;
   const displayName = credentials?.displayName ?? null;
+  // Read when a connection starts, not a reason to start one.
+  const rejoinAs = useRef(credentials?.participantId);
+  rejoinAs.current = credentials?.participantId;
 
   const send = useCallback((event: ClientEvent): boolean => {
     const socket = socketRef.current;
@@ -101,6 +114,7 @@ export function useRealtime(credentials: Credentials | null): Realtime {
     teardownRef.current = false;
     attemptRef.current = 0;
     setAttempt(0);
+    participantIdRef.current = rejoinAs.current;
 
     const clearTimers = () => {
       if (reconnectTimerRef.current !== null) {
@@ -173,18 +187,18 @@ export function useRealtime(credentials: Credentials | null): Realtime {
         // Resync handshake: re-declare identity, then re-enter the room. The
         // gateway answers with session_joined + a full room_state snapshot,
         // which replaces local state — nothing missed while offline is merged.
+        // The room to return to travels with the join: the gateway enters it
+        // (or the main room, if it is gone or now needs a code) as part of it.
+        const roomId = desiredRoomIdRef.current;
         socket.send(
           JSON.stringify({
             type: "join_session",
             sessionCode,
             displayName,
             ...(participantIdRef.current ? { participantId: participantIdRef.current } : {}),
+            ...(roomId ? { roomId } : {}),
           } satisfies ClientEvent),
         );
-        const roomId = desiredRoomIdRef.current;
-        if (roomId) {
-          socket.send(JSON.stringify({ type: "join_room", roomId } satisfies ClientEvent));
-        }
         startHeartbeat(socket);
       };
 
@@ -206,22 +220,25 @@ export function useRealtime(credentials: Credentials | null): Realtime {
         }
 
         if (event.type === "doc") {
-          for (const listener of docListenersRef.current) listener(event.roomId, event.data);
+          for (const listener of docListenersRef.current) listener(event.roomId, event.data, event.docId ?? MAIN_DOC_ID);
+          return;
+        }
+
+        if (event.type === "ask_sources" || event.type === "ask_delta" || event.type === "ask_done") {
+          for (const listener of askListenersRef.current) listener(event);
           return;
         }
 
         if (event.type === "session_joined") {
           participantIdRef.current = event.participant.id;
           dispatch({ type: "server_event", event });
-          // First connection of a session: land in the main room automatically.
+          // First connection of a session: the gateway puts everyone in the
+          // main room; follow it here.
           if (!desiredRoomIdRef.current) {
             const target = event.rooms.find((room) => room.isMain) ?? event.rooms[0];
             if (target) {
               desiredRoomIdRef.current = target.id;
               dispatch({ type: "room_requested", roomId: target.id });
-              socket.send(
-                JSON.stringify({ type: "join_room", roomId: target.id } satisfies ClientEvent),
-              );
             }
           }
           return;
@@ -234,10 +251,17 @@ export function useRealtime(credentials: Credentials | null): Realtime {
         if (socket.readyState !== WebSocket.CLOSED) socket.close();
       };
 
-      socket.onclose = () => {
+      socket.onclose = (event) => {
         if (socketRef.current === socket) socketRef.current = null;
         clearTimers();
         if (teardownRef.current) return;
+        // 4001: removed from the session by its owner. Reconnecting would only
+        // come back as a stranger, so the connection stays closed.
+        // 4002: not let in by the waiting room. Same: stay closed.
+        if (event.code === 4001 || event.code === 4002) {
+          setStatus("offline");
+          return;
+        }
         dispatch({ type: "connection_lost" });
         scheduleReconnect();
       };
@@ -334,7 +358,8 @@ export function useRealtime(credentials: Credentials | null): Realtime {
   const clearError = useCallback(() => dispatch({ type: "clear_error" }), []);
 
   const sendDoc = useCallback(
-    (roomId: string, data: string) => send({ type: "doc", roomId, data }),
+    (roomId: string, data: string, docId?: string) =>
+      send({ type: "doc", roomId, data, ...(docId && docId !== MAIN_DOC_ID ? { docId } : {}) }),
     [send],
   );
 
@@ -342,6 +367,19 @@ export function useRealtime(credentials: Credentials | null): Realtime {
     docListenersRef.current.add(listener);
     return () => {
       docListenersRef.current.delete(listener);
+    };
+  }, []);
+
+  const sendAsk = useCallback(
+    (roomId: string, requestId: string, question: string, history?: AskHistoryTurn[]) =>
+      send({ type: "ask", roomId, requestId, question, ...(history && history.length ? { history } : {}) }),
+    [send],
+  );
+
+  const subscribeAsk = useCallback((listener: AskListener) => {
+    askListenersRef.current.add(listener);
+    return () => {
+      askListenersRef.current.delete(listener);
     };
   }, []);
 
@@ -357,7 +395,9 @@ export function useRealtime(credentials: Credentials | null): Realtime {
       clearError,
       sendDoc,
       subscribeDoc,
+      sendAsk,
+      subscribeAsk,
     }),
-    [state, status, attempt, joinRoom, sendChat, sendTyping, reconnectNow, clearError, sendDoc, subscribeDoc],
+    [state, status, attempt, joinRoom, sendChat, sendTyping, reconnectNow, clearError, sendDoc, subscribeDoc, sendAsk, subscribeAsk],
   );
 }

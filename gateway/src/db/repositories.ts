@@ -16,19 +16,24 @@ import type {
   WebhookEndpoint,
   WebhookEventPayload,
 } from "@rmcollab/shared";
-import { LIBRARY_MATCH_END, LIBRARY_MATCH_START } from "@rmcollab/shared";
+import { LIBRARY_MATCH_END, LIBRARY_MATCH_START,
+  normalizeSessionCode,
+  SESSION_CODE_ALPHABET,
+  SESSION_CODE_LENGTH,
+} from "@rmcollab/shared";
 import { customAlphabet, nanoid } from "nanoid";
 import { storage } from "../storage/local.js";
 import { pool } from "./pool.js";
 
 // Ambiguity-free alphabet: join codes get read aloud and retyped.
-const joinCode = customAlphabet("ABCDEFGHJKLMNPQRSTUVWXYZ23456789", 6);
+const joinCode = customAlphabet(SESSION_CODE_ALPHABET, SESSION_CODE_LENGTH);
 
 interface SessionRow {
   id: string;
   code: string;
   name: string | null;
   created_at: number;
+  waiting_room: boolean;
 }
 
 interface RoomRow {
@@ -66,6 +71,7 @@ interface MediaItemRow {
   uploader_name: string;
   media_type: MediaType;
   original_filename: string | null;
+  title: string | null;
   storage_path: string;
   mime_type: string | null;
   size_bytes: number | null;
@@ -105,6 +111,7 @@ const toSession = (row: SessionRow): Session => ({
   code: row.code,
   name: row.name,
   createdAt: row.created_at,
+  waitingRoom: Boolean(row.waiting_room),
 });
 
 // access_code is never selected into RoomRow: a room's code must not be able to
@@ -147,6 +154,7 @@ const toMediaItem = (row: MediaItemRow): MediaItem => ({
   uploaderName: row.uploader_name,
   mediaType: row.media_type,
   originalFilename: row.original_filename,
+  title: row.title ?? null,
   originalUrl: storage.publicUrl(row.storage_path),
   mimeType: row.mime_type,
   sizeBytes: row.size_bytes,
@@ -277,7 +285,7 @@ export async function createSession(name: string | null): Promise<Session> {
       `INSERT INTO sessions (id, code, name, created_at)
        VALUES ($1, $2, $3, $4)
        ON CONFLICT (code) DO NOTHING
-       RETURNING id, code, name, created_at`,
+       RETURNING id, code, name, created_at, waiting_room`,
       [nanoid(16), code, name, now],
     );
     const row = rows[0];
@@ -286,18 +294,33 @@ export async function createSession(name: string | null): Promise<Session> {
   throw new Error("could not allocate a unique session code");
 }
 
-export async function getSessionByCode(code: string): Promise<Session | null> {
+/**
+ * The session a code opens. A retired code (from before a removal) opens it
+ * only for a current member who brings their participant id - never for
+ * someone new, which is the point of changing it.
+ */
+export async function getSessionByCode(code: string, participantId?: string): Promise<Session | null> {
+  const normalized = normalizeSessionCode(code);
   const { rows } = await pool.query<SessionRow>(
-    `SELECT id, code, name, created_at FROM sessions WHERE code = $1`,
-    [code.toUpperCase()],
+    `SELECT id, code, name, created_at, waiting_room FROM sessions WHERE code = $1`,
+    [normalized],
   );
-  const row = rows[0];
-  return row ? toSession(row) : null;
+  if (rows[0]) return toSession(rows[0]);
+  if (!participantId) return null;
+  const { rows: retired } = await pool.query<SessionRow>(
+    `SELECT s.id, s.code, s.name, s.created_at, s.waiting_room
+     FROM retired_session_codes r
+     JOIN sessions s ON s.id = r.session_id
+     JOIN participants p ON p.session_id = s.id AND p.id = $2 AND p.removed_at IS NULL AND NOT p.waiting
+     WHERE r.code = $1`,
+    [normalized, participantId],
+  );
+  return retired[0] ? toSession(retired[0]) : null;
 }
 
 export async function getSessionById(id: string): Promise<Session | null> {
   const { rows } = await pool.query<SessionRow>(
-    `SELECT id, code, name, created_at FROM sessions WHERE id = $1`,
+    `SELECT id, code, name, created_at, waiting_room FROM sessions WHERE id = $1`,
     [id],
   );
   const row = rows[0];
@@ -345,7 +368,7 @@ export async function getRoomCodeForOwner(
   return rows[0]?.access_code ?? null;
 }
 
-export type RoomAccess = "open" | "granted" | "code_required" | "code_invalid";
+export type RoomAccess = "open" | "granted" | "code_required" | "code_invalid" | "banned" | "not_member";
 
 /**
  * Decides whether a participant may enter a room, and records the grant when a
@@ -361,7 +384,22 @@ export async function resolveRoomAccess(
     [roomId],
   );
   const room = rows[0];
-  if (!room || room.access_code === null) return "open";
+  if (!room) return "open";
+  // No longer in the session (removed from it), or not let in yet (waiting
+  // room). Their participant id still sits in their browser, and every HTTP
+  // route authorises through here, so this is where it stops working.
+  const { rowCount: current } = await pool.query(
+    `SELECT 1 FROM participants WHERE id = $1 AND removed_at IS NULL AND NOT waiting`,
+    [participantId],
+  );
+  if (!current) return "not_member";
+  // Removed by the owner: not even the code lets them back in.
+  const { rowCount: banned } = await pool.query(
+    `SELECT 1 FROM room_bans WHERE room_id = $1 AND participant_id = $2`,
+    [roomId, participantId],
+  );
+  if (banned) return "banned";
+  if (room.access_code === null) return "open";
 
   const { rowCount } = await pool.query(
     `SELECT 1 FROM room_members WHERE room_id = $1 AND participant_id = $2`,
@@ -418,7 +456,7 @@ export async function upsertParticipant(input: {
     const { rows } = await pool.query<ParticipantRow>(
       `UPDATE participants
        SET display_name = $3, connected = TRUE, last_seen_at = $4
-       WHERE id = $1 AND session_id = $2
+       WHERE id = $1 AND session_id = $2 AND removed_at IS NULL
        RETURNING ${PARTICIPANT_COLS}`,
       [input.participantId, input.sessionId, input.displayName, now],
     );
@@ -531,13 +569,14 @@ export async function insertMediaItem(input: {
   storagePath: string;
   mimeType: string | null;
   sizeBytes: number | null;
+  title?: string | null;
   id?: string;
 }): Promise<MediaItem | null> {
   const { rows } = await pool.query<MediaItemRow>(
     `WITH inserted AS (
        INSERT INTO media_items
-         (id, room_id, uploader_id, media_type, original_filename, storage_path, mime_type, size_bytes, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         (id, room_id, uploader_id, media_type, original_filename, storage_path, mime_type, size_bytes, created_at, title)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
        RETURNING *
      )
      SELECT inserted.*, p.display_name AS uploader_name
@@ -552,10 +591,83 @@ export async function insertMediaItem(input: {
       input.mimeType,
       input.sizeBytes,
       Date.now(),
+      input.title ?? null,
     ],
   );
   const row = rows[0];
   return row ? toMediaItem(row) : null;
+}
+
+/** Where an upload's original is stored, for re-running its job. */
+export async function mediaStoragePath(mediaItemId: string): Promise<string | null> {
+  const { rows } = await pool.query<{ storage_path: string }>(`SELECT storage_path FROM media_items WHERE id = $1`, [mediaItemId]);
+  return rows[0]?.storage_path ?? null;
+}
+
+/** Renames an upload; null clears the name back to the file name. */
+export async function setMediaTitle(mediaItemId: string, title: string | null): Promise<MediaItem | null> {
+  await pool.query(`UPDATE media_items SET title = $2 WHERE id = $1`, [mediaItemId, title]);
+  return getMediaItem(mediaItemId);
+}
+
+/** Deletes an upload; its jobs, artifacts and passages go with it (ON DELETE CASCADE). */
+export async function deleteMediaItem(mediaItemId: string): Promise<boolean> {
+  const { rowCount } = await pool.query(`DELETE FROM media_items WHERE id = $1`, [mediaItemId]);
+  return (rowCount ?? 0) > 0;
+}
+
+/** Deletes a room and everything in it. */
+export async function deleteRoom(roomId: string): Promise<boolean> {
+  const { rowCount } = await pool.query(`DELETE FROM rooms WHERE id = $1 AND NOT is_main`, [roomId]);
+  return (rowCount ?? 0) > 0;
+}
+
+/** The newest job for an upload, for retrying one that failed. */
+export async function latestJob(mediaItemId: string): Promise<EnhancementJob | null> {
+  const { rows } = await pool.query<JobRow>(
+    `SELECT ${JOB_COLS} FROM enhancement_jobs WHERE media_item_id = $1 ORDER BY created_at DESC LIMIT 1`,
+    [mediaItemId],
+  );
+  return rows[0] ? toJob(rows[0]) : null;
+}
+
+// --- session lifetime ------------------------------------------------------------
+
+export async function touchSession(sessionId: string): Promise<void> {
+  await pool.query(`UPDATE sessions SET last_active_at = $2 WHERE id = $1 AND coalesce(last_active_at, 0) < $2`, [
+    sessionId,
+    Date.now(),
+  ]);
+}
+
+/** Sessions idle since before `cutoff` with nobody connected, and their rooms. */
+export async function idleSessions(cutoff: number, limit = 50): Promise<{ id: string; roomIds: string[] }[]> {
+  const { rows } = await pool.query<{ id: string; room_ids: string[] | null }>(
+    `SELECT s.id, array_remove(array_agg(r.id), NULL) AS room_ids
+     FROM sessions s LEFT JOIN rooms r ON r.session_id = s.id
+     WHERE coalesce(s.last_active_at, s.created_at) < $1
+     GROUP BY s.id
+     LIMIT $2`,
+    [cutoff, limit],
+  );
+  return rows.map((row) => ({ id: row.id, roomIds: row.room_ids ?? [] }));
+}
+
+export async function deleteSession(sessionId: string): Promise<void> {
+  await pool.query(`DELETE FROM sessions WHERE id = $1`, [sessionId]);
+}
+
+/** Which of these room ids still exist, for sweeping storage left behind. */
+export async function existingRooms(roomIds: string[]): Promise<Set<string>> {
+  if (roomIds.length === 0) return new Set();
+  const { rows } = await pool.query<{ id: string }>(`SELECT id FROM rooms WHERE id = ANY($1::text[])`, [roomIds]);
+  return new Set(rows.map((r) => r.id));
+}
+
+export async function existingMediaItems(ids: string[]): Promise<Set<string>> {
+  if (ids.length === 0) return new Set();
+  const { rows } = await pool.query<{ id: string }>(`SELECT id FROM media_items WHERE id = ANY($1::text[])`, [ids]);
+  return new Set(rows.map((r) => r.id));
 }
 
 export async function insertJob(input: {
@@ -959,6 +1071,7 @@ interface LibraryRow extends ArtifactRow {
   media_item_id: string;
   media_type: MediaType;
   original_filename: string | null;
+  title: string | null;
   uploader_name: string;
   strategy: string;
   snippet: string | null;
@@ -992,6 +1105,7 @@ const toLibraryEntry = (row: LibraryRow): LibraryEntry => ({
   mediaItemId: row.media_item_id,
   mediaType: row.media_type,
   originalFilename: row.original_filename,
+  title: row.title ?? null,
   uploaderName: row.uploader_name,
   strategy: row.strategy,
   snippet: row.snippet,
@@ -1005,7 +1119,7 @@ const LIBRARY_FROM = `
   JOIN participants p ON p.id = m.uploader_id`;
 
 const LIBRARY_SELECT = `${ARTIFACT_COLS}, m.id AS media_item_id, m.media_type,
-  m.original_filename, p.display_name AS uploader_name, j.strategy`;
+  m.original_filename, m.title, p.display_name AS uploader_name, j.strategy`;
 
 /**
  * Every document a room has produced, newest first - or, with a query, the ones
@@ -1037,7 +1151,8 @@ export async function listLibrary(roomId: string, query: string | null): Promise
               coalesce(nullif(a.body, ''), a.label),
               q.query,
               CASE WHEN length(coalesce(nullif(a.body, ''), a.label)) <= ${SNIPPET_CHARS} THEN $4 ELSE $3 END
-            ), E' 	
+            ), E' 	
+
 ') AS snippet,
             hit.stamp AS hit_stamp
      ${LIBRARY_FROM}
@@ -1083,4 +1198,110 @@ export async function getArtifactTexts(jobId: string): Promise<ArtifactText[]> {
     [jobId],
   );
   return rows.map((r) => ({ kind: r.kind, mimeType: r.mime_type, body: r.body || null, meta: r.meta ?? {} }));
+}
+
+// --- removing people -------------------------------------------------------------
+
+/**
+ * The session's main room has no creator (it exists before anyone joins), so
+ * the first person into the session - in practice whoever started it - owns it.
+ */
+export async function claimMainRoom(sessionId: string, participantId: string): Promise<void> {
+  await pool.query(
+    `UPDATE rooms SET created_by = $2 WHERE session_id = $1 AND is_main AND created_by IS NULL`,
+    [sessionId, participantId],
+  );
+}
+
+/** Bars a participant from a room and takes back any code they were let in with. */
+export async function banFromRoom(roomId: string, participantId: string): Promise<void> {
+  await pool.query(
+    `INSERT INTO room_bans (room_id, participant_id, banned_at) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+    [roomId, participantId, Date.now()],
+  );
+  await pool.query(`DELETE FROM room_members WHERE room_id = $1 AND participant_id = $2`, [roomId, participantId]);
+}
+
+/** Removes a participant from the session: their id stops working, and they are off every list. */
+export async function removeFromSession(participantId: string): Promise<void> {
+  await pool.query(
+    `UPDATE participants SET removed_at = $2, connected = FALSE, current_room_id = NULL WHERE id = $1`,
+    [participantId, Date.now()],
+  );
+}
+
+// --- keeping removed people out ------------------------------------------------------
+
+/** A new code for the session; the old one retires (see getSessionByCode). */
+export async function rotateSessionCode(sessionId: string): Promise<Session | null> {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const code = joinCode();
+    const { rows } = await pool.query<SessionRow>(
+      `WITH old AS (SELECT code FROM sessions WHERE id = $1),
+       retired AS (
+         INSERT INTO retired_session_codes (code, session_id, retired_at)
+         SELECT code, $1, $3 FROM old ON CONFLICT DO NOTHING
+       )
+       UPDATE sessions SET code = $2 WHERE id = $1
+         AND NOT EXISTS (SELECT 1 FROM retired_session_codes WHERE code = $2)
+       RETURNING id, code, name, created_at, waiting_room`,
+      [sessionId, code, Date.now()],
+    ).catch((err: unknown) => {
+      // A clash with another session's code: try another.
+      if (err instanceof Error && /unique|duplicate/i.test(err.message)) return { rows: [] as SessionRow[] };
+      throw err;
+    });
+    if (rows[0]) return toSession(rows[0]);
+  }
+  return null;
+}
+
+/** Whoever owns the session: its main room's owner. */
+export async function sessionOwnerId(sessionId: string): Promise<string | null> {
+  const { rows } = await pool.query<{ created_by: string | null }>(
+    `SELECT created_by FROM rooms WHERE session_id = $1 AND is_main`,
+    [sessionId],
+  );
+  return rows[0]?.created_by ?? null;
+}
+
+export async function setWaitingRoom(sessionId: string, on: boolean): Promise<Session | null> {
+  const { rows } = await pool.query<SessionRow>(
+    `UPDATE sessions SET waiting_room = $2 WHERE id = $1 RETURNING id, code, name, created_at, waiting_room`,
+    [sessionId, on],
+  );
+  return rows[0] ? toSession(rows[0]) : null;
+}
+
+/** A current member: joined before and let in, and not removed. */
+export async function isAdmittedMember(sessionId: string, participantId: string | undefined): Promise<boolean> {
+  if (!participantId) return false;
+  const { rowCount } = await pool.query(
+    `SELECT 1 FROM participants WHERE id = $1 AND session_id = $2 AND removed_at IS NULL AND NOT waiting`,
+    [participantId, sessionId],
+  );
+  return (rowCount ?? 0) > 0;
+}
+
+export async function setWaiting(participantId: string, waiting: boolean): Promise<void> {
+  await pool.query(`UPDATE participants SET waiting = $2 WHERE id = $1`, [participantId, waiting]);
+}
+
+export async function isWaiting(participantId: string): Promise<boolean> {
+  const { rows } = await pool.query<{ waiting: boolean }>(
+    `SELECT waiting FROM participants WHERE id = $1 AND removed_at IS NULL`,
+    [participantId],
+  );
+  return Boolean(rows[0]?.waiting);
+}
+
+/** Who is waiting to be let in right now. */
+export async function listWaiting(sessionId: string): Promise<{ id: string; displayName: string }[]> {
+  const { rows } = await pool.query<{ id: string; display_name: string }>(
+    `SELECT id, display_name FROM participants
+     WHERE session_id = $1 AND waiting AND connected AND removed_at IS NULL
+     ORDER BY joined_at`,
+    [sessionId],
+  );
+  return rows.map((r) => ({ id: r.id, displayName: r.display_name }));
 }

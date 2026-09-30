@@ -13,11 +13,29 @@ learned speech denoising) as standalone tools.
 ## A quick tour
 
 **The room's notes.** A shared document laid out like a word processor. Each upload gets its own
-section - here a summarised meeting, a lecture recording and a whiteboard photo - filled in by the
-workers as the analysis finishes. Bob's cursor is live; the outline on the left follows the
-headings and uploads.
+section - here a meeting note, a lecture recording and a whiteboard photo, from the sample room -
+filled in by the workers as the analysis finishes. Bob's cursor is live; the outline on the left
+follows the headings and uploads.
 
 ![Room notes: a shared document with sections written by uploads, a collaborator's live cursor, and a document outline](docs/screenshots/notes.png)
+
+**Several documents a room.** Notes opens on the room's documents, like a folder. Room notes -
+where uploads land - is always there; anyone can start another (an exam plan, a report draft), and
+it appears for everyone at once. Each has its own history and export.
+
+![A room's documents: Room notes, where uploads land, and an exam plan the group started](docs/screenshots/documents.png)
+
+**Ask the room.** A question answered from the room's own material, with every claim cited; a
+citation opens its source - the recording at that second, the document, or the notes section.
+Answers are private until someone adds one to the notes.
+
+![Ask the room, docked beside the notes, answering with two cited sources](docs/screenshots/ask.png)
+
+**Drop anything; it says what it will do.** Each file is recognised and measured, and given the
+action that suits it - a recording is transcribed and summarised, a whiteboard read into notes, a
+short scrawl polished. Nothing runs until the click.
+
+![The add-media panel with a recording, a whiteboard photo and pasted text, each with a recommended action](docs/screenshots/add-media.png)
 
 **A whiteboard, read into notes** - seen by a second person, in dark mode. The vision model
 transcribes what is written, describes the diagram, keeps exact details (`XAUTOCLAIM`, `91.7`), and
@@ -42,12 +60,13 @@ to that line.
 
 ![Library search for "gateway" matching a summary, a rewrite, image notes and a transcript at 0:03](docs/screenshots/library.png)
 
-**No accounts.** Start a session, share its six-character code, and split into breakout rooms -
-lockable with a room code.
+**No accounts.** Start a session (or try the sample room), share its ten-character code, and split
+into breakout rooms - lockable with a room code.
 
 ![The landing page, with start-a-session and join-a-session forms](docs/screenshots/landing.png)
 
-<sub>Screenshots come from a live stack and are regenerated with `npm run screenshots`.</sub>
+<sub>Screenshots come from a live stack and are regenerated with `npm run screenshots`, from the sample
+room - so no image is sent to the vision model again, and a busy free tier cannot fail the run.</sub>
 
 ---
 
@@ -341,9 +360,114 @@ do, as one more peer. Rules it keeps:
   gateway, and a client test loads everything it can produce into the real editor schema and fails
   if anything would be dropped.
 
+**Several documents, one machinery.** A room's main document keeps the room id as its key, so
+notes from before there were several load unchanged; any other document is keyed `<roomId>:<docId>`.
+The hub, storage, history and compaction all work per key, and only the storage layer and the
+socket protocol split one; a doc frame names its document, and a socket is checked into a document
+of its room once before its edits are applied, so a made-up id cannot become a document. Ask the
+room searches every document in the room, and a citation carries which document it came from.
+
+**Version history.** Anyone in a room can edit its notes, so anyone can erase them. Restore points
+are taken hourly while a room is edited and, crucially, *before a large deletion*: the hub keeps a
+copy of the document at most 30 seconds old and, once per saved batch (not per keystroke), checks
+whether the notes shrank by 40% and 400 characters; if so, that copy is saved. A "Version
+history" panel lists the points with a preview; restoring replaces the notes for everyone, as a
+live edit, after first saving what was there - so a restore can itself be undone. A room keeps its
+latest 50.
+
 The editor is split out of the main bundle and loaded on first use (66 KB vs 168 KB gzipped).
 `npm run check:notes-replicas` runs two editors against two gateway replicas directly, bypassing
 the load balancer so they are guaranteed to be on different replicas.
+
+**Export.** The notes download as Markdown - serialised from the editor's own document with
+`prosemirror-markdown`, so checklists, highlights and each upload's section (with who added it and
+when) survive - optionally with the full transcripts appended. PDF is the browser's print dialog
+over a dedicated print layout: a clean copy of the document is rendered outside the app, whose
+fixed-height scrolling panels would otherwise clip a printed page to one screenful.
+
+## Ask the room: answers from the room's own material
+
+Ask lives in a dock beside the chat - a pill in the corner of every view, or Ctrl/⌘+K - so a
+question is never more than a keystroke away, and the answer stays on screen beside whatever source
+it opens. A question like _"what did we decide about Kafka?"_ is answered from what the room holds -
+transcripts, summaries, uploaded documents and the shared notes - with every claim cited. A
+citation opens its source: a recording at the moment the passage is spoken, a document in the
+feed, a notes section scrolled into view. Answers are private to whoever asked, until they choose
+**Add to notes**, which appends the question, the answer and its sources to the shared notes as
+their own (undoable) edit.
+
+```
+  question ──ws──▶ gateway ──ask queue──▶ ask worker: embed the question + the notes' sections
+                     │  ◀──── vectors, on a per-request pub/sub channel ─────┘
+                     │  rank the room's passages + notes (pgvector + full text, fused)
+                     ├──ws──▶ asker: the numbered sources
+                     └──ask queue──▶ ask worker: write the answer from those passages
+            asker ◀──ws── gateway ◀──── answer, streamed in pieces ─────┘
+```
+
+**Why it is split this way.** The embedding model is Python; the database belongs to the
+gateway. Workers stay stateless compute - they never read the database - so a question makes two
+trips: the worker embeds, the gateway retrieves, the worker writes. Replies travel on a pub/sub
+channel only the asking socket's replica listens on, so it works across gateway replicas without
+any stickiness. Questions have **their own queue and pool**, so an answer never waits behind a
+20-minute lecture being summarised.
+
+**Passages.** Each searchable document is split once, as its job finishes (older ones by a
+backfill at boot): transcripts into runs of spoken lines about 700 characters long that overlap by
+one line and keep the second they start at; documents by paragraph, each passage prefixed with its
+section heading so "Priya drafts it" still reads as an action item. The worker embeds them in
+batches and sends the vectors back on a Redis stream that one gateway consumes. The notes change as
+people type, so they are cut into sections at question time; their vectors are cached by content,
+and only edited sections are embedded again.
+
+**The embedding model was chosen by measurement, not reputation.** `e2e/fixtures/ask-eval.json`
+is a labelled set: one study group's material, with distractors, and 21 questions whose answer
+sits in a known passage - many of them paraphrases sharing no words with it ("when is the exam?"
+for "the midterm is on the twelfth"). `workers/tools/eval_embeddings.py` compares local models on
+it:
+
+| Model                              | Size   | Right passage first | In top 3 | per question |
+| ---------------------------------- | ------ | ------------------- | -------- | ------------ |
+| bge-small-en-v1.5 (the first plan) | 67 MB  | 0.89                | 0.94     | 14 ms        |
+| bge-base-en-v1.5                   | 210 MB | 0.89                | 1.00     | 83 ms        |
+| all-MiniLM-L6-v2                   | 90 MB  | 0.94                | 0.94     | 22 ms        |
+| **snowflake-arctic-embed-m**       | 430 MB | **0.94**            | **1.00** | 40 ms        |
+
+(The first 18 questions; the three identifier questions were added later.) It runs locally
+(fastembed, ONNX on the CPU): a room's lectures stay on the machine, and there is no quota. The Ask
+pool runs threads, not processes, so one copy of the model serves every job.
+
+**Keywords barely count, and that was measured too.** The plan was the usual hybrid - meaning
+and keywords ranked separately, then merged - on the theory that keywords catch the exact names
+and codes embeddings blur. On the full set, including exact identifiers (`XAUTOCLAIM`,
+`CS-451 HW3`, `allkeys-lru`):
+
+| Keyword weight in the merge | Right passage first | In top 3 |
+| --------------------------- | ------------------- | -------- |
+| 0 (meaning only)            | 0.90                | 1.00     |
+| 0.3                         | 0.81                | 0.90     |
+| 0.5                         | 0.81                | 0.90     |
+
+A common word ("under **load**") dragged in passages that merely shared it ("**load**
+balancer"). So keywords are weighted at 0.01: less than one step of the meaning ranking, enough to
+break near-ties and to keep a passage findable before its embedding lands. The e2e test re-runs
+the whole set against the live stack and fails if the answer drops out of the top three for more
+than one question.
+
+**Follow-up questions.** Each question used to be answered on its own, so "and who owns that?"
+found nothing. The browser now sends the asker's last three turns with a question (the gateway
+keeps no conversation - a question is private), and the worker rewrites a follow-up into one that
+stands alone before it is embedded: "when is that due?" after a question about Priya's section
+becomes "when is the consumer groups section due?". That rewrite is what is searched and answered,
+and the panel shows it ("Searched for: ..."), so a misreading is visible. Without a model, the
+previous question is prepended, which carries the missing context into the search. The question
+set has follow-ups too, each with the turn it follows, and the e2e test measures them.
+
+**Grounding.** The model is told to answer only from the numbered passages, cite each claim, and
+say "The room's material doesn't cover this" otherwise; passages are marked as material, never
+instructions. The gateway keeps only citations that point at a passage it actually sent. With no
+model configured, or its quota spent, the asker still gets the passages that matched. Six questions
+a minute per person; a locked room's material is only askable by people let into it.
 
 ## Access and security
 
@@ -357,6 +481,25 @@ the load balancer so they are guaranteed to be on different replicas.
   (the S3 approach). A bare or tampered path returns 403.
 - **SSRF-safe webhooks.** Outbound webhook URLs are validated against private, loopback and
   link-local ranges by resolving the hostname rather than pattern-matching it.
+- **Session codes that cannot be guessed.** Ten characters from an alphabet without look-alikes
+  (no I, O, 0 or 1): about 50 bits, where the original six could be enumerated. Shown as
+  `ABCDE-23456`, typed with or without the dash in any case; older six-character codes still work.
+  Length alone is not relied on - an address that tries 20 codes that do not exist in ten minutes
+  is refused for a while, over HTTP and over the socket alike. The address is the one the load
+  balancer saw; a forwarded header from the client is not trusted.
+- **Removing people.** A room's owner can remove someone. From a breakout room they are moved to
+  the main room and barred from coming back into it, even with its code; from the main room -
+  owned by the session's first participant, in practice whoever started it - they are removed from
+  the session. Their connections are taken out on the server, not just told to leave, so a client
+  that ignores the notice cannot stay.
+- **Keeping them out.** With guest identity a removal bars a participant id, not a person, who
+  could come back with the code under a new name. So removing someone from the session also
+  **changes its code**: the owner is shown the new one to share, and the old one lets nobody new
+  in. It is retired rather than forgotten, so everyone still in the session - a reload, a rejoin
+  from Recent sessions - carries on without noticing. For a tighter room the owner can switch on a
+  **waiting room**: someone new then sees only "Waiting to be let in" until the owner admits or
+  turns them away, and their socket is told nothing of the session meanwhile - no rooms, no
+  participants, no messages. Anyone already admitted comes straight back.
 - **Guest identity.** There are no accounts: a participant id is effectively a bearer token, and
   the owner-only endpoints are exactly as strong as that id. This is a deliberate scope choice
   for a classroom tool, not an oversight.
@@ -365,6 +508,55 @@ the load balancer so they are guaranteed to be on different replicas.
 Python and consumed in TypeScript. `npm run check:contracts` parses both definitions and fails
 with a specific diff if they drift - including the deliberate camelCase/snake_case split between
 the two payloads.
+
+## Running in public: limits, budgets and expiry
+
+Anyone with a session code can upload, and every upload is GPU or model work, so what things
+cost is bounded before anything is stored (`gateway/src/limits.ts`, `workers/common/budget.py`):
+
+| Limit                            | Default                           | Set with                                                  |
+| -------------------------------- | --------------------------------- | --------------------------------------------------------- |
+| Uploads per person               | 10 a minute, 60 an hour           | `LIMIT_UPLOADS_PER_MINUTE`, `LIMIT_UPLOADS_PER_HOUR`      |
+| Uploads per session              | 200 an hour                       | `LIMIT_SESSION_UPLOADS_PER_HOUR`                          |
+| Jobs queued or running, per session | 12                             | `LIMIT_ACTIVE_JOBS_PER_SESSION`                           |
+| Storage                          | 500 MB a room, 2 GB a session     | `LIMIT_ROOM_STORAGE_MB`, `LIMIT_SESSION_STORAGE_MB`       |
+| Sample rooms                     | 6 an hour per address             | `LIMIT_DEMOS_PER_HOUR`                                    |
+| Questions (Ask the room)         | 6 a minute per person             |                                                           |
+| Model calls                      | per task, per UTC day (below)     | `LLM_<TASK>_DAILY_BUDGET` (`0` = no limit)                |
+
+Rate windows are counted in Redis, so every replica enforces the same numbers; a refusal says
+which limit was hit and when it lifts, with `Retry-After`. Retries count as uploads - they spend
+the same GPU time.
+
+**Model budgets pause a feature instead of failing jobs.** Free tiers cap requests per day -
+Gemini's image model at 20 - so each task profile has its own daily allowance of calls (image
+reading 18, summaries 300, rewrites 800, answers 800), counted cluster-wide. A provider's own
+"daily quota exceeded" marks the budget spent too, so nothing keeps calling a model that will
+refuse. A spent budget makes the strategies that need it report themselves unavailable, *with a
+reason*, through the same adverts that route jobs: the Add media panel then shows "Image reading
+is paused until tomorrow" and recommends what can run (sharpening, for an image), a recording is
+still transcribed with a note that its summary is paused, and Ask returns the matching passages
+without an answer.
+
+**Nothing lives for ever.** A session nobody has touched for three days (`SESSION_TTL_DAYS`) is
+deleted - rooms, uploads, notes, chat, files. Activity is recorded at most every few minutes per
+session, so typing is not a write per keystroke. An hourly sweep, one replica at a time under a
+Postgres advisory lock, deletes idle sessions and then any stored folder no row points at (a
+worker that finished writing after its upload was deleted). The landing page says so, and says
+that uploads go to third-party models.
+
+**People can take things back.** Whoever added an upload - or the room's owner - can rename or
+delete it; deleting removes its results, its searchable passages, its section in the notes and
+its files, and the whole room hears. A room's owner can delete a breakout room, and anyone inside
+moves to the main room. A failed upload has a Retry button (anyone in the room can use it), and
+pasted text is titled by its first words instead of "Text from Alice".
+
+**Getting back in.** The landing page lists the sessions this browser has joined, and rejoining
+one comes back as the same participant - which is what keeps your right to rename or delete what
+you added. There are still no accounts: the list is in the browser, and it is the whole of "my
+rooms". **Try a sample room** opens a session already holding a lecture, a whiteboard photo and a
+meeting note, with the results this app really produced for them (`gateway/demo/`). It is
+assembled from those saved results, so opening one costs no GPU time or model quota.
 
 ## Webhooks
 
@@ -397,20 +589,26 @@ a receiver returning 400 will return 400 again.
 | Gateway       | Node 20, Express, `ws`, ioredis, `pg`                                                                |
 | Workers       | Python 3.11, Celery, Redis broker                                                                    |
 | Models        | faster-whisper, Real-ESRGAN (RRDBNet), DeepFilterNet; LLM via Anthropic or any OpenAI-compatible API |
-| State         | Postgres 16                                                                                          |
+| State         | Postgres 16 with pgvector (built on the same Alpine base; see infra/postgres/Dockerfile)              |
 | Bus           | Redis - pub/sub (fan-out), Streams (job events), lists (task queues)                                 |
 | Orchestration | Docker Compose, NVIDIA GPU passthrough                                                               |
 
 ## Running it
 
 ```bash
-cp .env.example .env
 docker compose -f infra/docker-compose.yml up --build
 ```
 
-The stack runs with no keys at all. To enable the LLM strategies (`rewrite`, `summarise`), set
-**either** `ANTHROPIC_API_KEY`, **or** `LLM_BASE_URL` + `LLM_API_KEY` + `LLM_MODEL` for any
-OpenAI-compatible gateway. `.env.example` documents both.
+The stack runs with no keys at all. Settings and keys go in a `.env` at the repo root, which is
+gitignored and reaches the containers through compose's `env_file`, never an image. To enable the
+LLM strategies (`rewrite`, `summarise`), set **either** `ANTHROPIC_API_KEY`, **or**
+`LLM_BASE_URL` + `LLM_API_KEY` + `LLM_MODEL` for any OpenAI-compatible gateway.
+
+Error tracking is off until you give it somewhere to send: set `SENTRY_DSN` (gateway and workers)
+and `VITE_SENTRY_DSN` (the browser) in `.env`, from a Sentry project's Client Keys. It reports
+errors only, and never content: request bodies, headers, query strings, task arguments, local
+variables and log breadcrumbs are all stripped before sending, and session codes are blanked
+wherever they appear (`shared/src/scrub.ts`, `workers/common/errors.py`, both tested).
 
 - App: http://localhost:5173
 - API (via the load balancer): http://localhost:4000 (`/health`, `/api/strategies`, `/api/metrics`)
@@ -453,7 +651,8 @@ The default is Gemini 3.5 Flash, with a caveat that decides where it is appropri
 free-tier prompts for training and human reviewers may read them, and its terms ask for no personal
 data. That is fine for a demo on your own recordings and wrong for anyone else's. Groq contractually
 does not train on inputs, so it is the choice when privacy outranks summary quality. Either is a
-change to `.env` only; `.env.example` has both with their measured settings.
+change to `.env` only: `LLM_BASE_URL`, `LLM_API_KEY` and `LLM_MODEL`, plus `LLM_CHUNK_CHARS` sized to
+the provider's context as described above.
 
 These are single-transcript results from September 2026 on synthetic speech-like text, and free
 model line-ups change month to month.
@@ -528,8 +727,8 @@ Three layers, from fastest to most real:
 | Layer               | Command                        | Needs                                         | Covers                                                                                                                                |
 | ------------------- | ------------------------------ | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
 | Unit (TS)           | `npm test`                     | Node 20                                       | gateway (Celery wire format, SSRF guard, signing, storage, params), client (reducer, event guards), cross-language contract check     |
-| Unit (Python)       | `npm run test:workers`         | `pip install -r workers/requirements-dev.txt` | strategy registry, LLM provider selection, event throttling, comprehension pipeline                                                   |
-| End to end          | `npm run test:e2e`             | the stack running (`docker compose ... up`)   | real browsers and sockets against the live stack: fan-out, locked rooms, signed URLs, GPU enhancement, transcription, co-edited notes |
+| Unit (Python)       | `npm run test:workers`         | `pip install -r workers/requirements-dev.txt` | strategy registry, LLM provider selection, event throttling, comprehension pipeline, Ask tasks (in the worker image)                       |
+| End to end          | `npm run test:e2e`             | the stack running (`docker compose ... up`)   | real browsers and sockets against the live stack: fan-out, locked rooms, signed URLs, GPU enhancement, transcription, co-edited notes, export, Ask retrieval quality |
 | Cross-replica notes | `npm run check:notes-replicas` | `--scale gateway=2`                           | two editors pinned to different gateway replicas: edits, concurrent edits, late joiners and presence all crossing Redis               |
 
 `npm run typecheck` type-checks every TypeScript package. Python tests marked `ml` need the GPU
@@ -575,7 +774,12 @@ IPv4-mapped IPv6 into hex form, and an event guard that accepted `toString` as a
 | 8   | Room notes - a CRDT document the whole room edits live, across gateway replicas              | done   |
 | 9   | Uploads write into the notes - a section per upload, live placeholders, provenance           | done   |
 | 10  | Images read into notes (vision model), chapters for long recordings, rooms open on the notes | done   |
-| 11  | Ask the room - questions answered from everything in its notes and transcripts, with sources | next   |
+| 11  | Ask the room - questions answered from everything in its notes and transcripts, with sources | done   |
+| 12  | Export - the notes as Markdown (with transcripts) or a printable PDF                         | done   |
+| 13  | Public-ready - upload limits, daily model budgets, deletion, 3-day expiry                    | done   |
+| 14  | Sample room, recent sessions, rename and retry, follow-up questions, notes version history   | done   |
+| 15  | Several documents a room, removing people, ten-character codes with a guessing limit         | done   |
+| 16  | Waiting room, a new code after each removal, error tracking that never sends content         | done   |
 
 Not planned: live audio/video calling (a deliberate scope cut - rooms are workspaces, not calls),
 and user accounts (groups return by session code; "my rooms across devices" needs real identity).

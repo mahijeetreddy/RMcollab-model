@@ -126,7 +126,7 @@ function element(name: string, children: (Y.XmlElement | Y.XmlText)[], attrs: Re
 
 const paragraphNode = (content: Inline[]) => element("paragraph", [textNode(content)]);
 
-function blockNode(block: NoteBlock): Y.XmlElement {
+export function blockNode(block: NoteBlock): Y.XmlElement {
   switch (block.kind) {
     case "heading":
       return element("heading", [textNode(block.content)], { level: block.level });
@@ -194,3 +194,95 @@ export function fillSection(section: Y.XmlElement, blocks: NoteBlock[], status: 
   section.insert(section.length, nodes);
   return "appended";
 }
+
+// --- the notes as sections, for Ask the room -----------------------------------------
+
+export interface NotesSection {
+  /**
+   * Stable enough to point back at: "u:<mediaItemId>" for an upload's section,
+   * "h:<n>" for the part under the n-th top-level heading (counting from 0),
+   * "top" for anything before the first heading. The editor finds a section by
+   * the same rules, so a citation can scroll to it.
+   */
+  key: string;
+  title: string;
+  text: string;
+}
+
+const BLOCK_SEPARATOR = "\n";
+
+function plainText(node: Y.XmlElement | Y.XmlText | Y.XmlHook): string {
+  if (node instanceof Y.XmlText) {
+    return node
+      .toDelta()
+      .map((part: { insert?: unknown }) => (typeof part.insert === "string" ? part.insert : ""))
+      .join("");
+  }
+  if (node instanceof Y.XmlElement) {
+    const parts = node.toArray().map((child) => plainText(child as Y.XmlElement | Y.XmlText));
+    // Inline content joins directly; blocks each get a line.
+    const inline = node.nodeName === "paragraph" || node.nodeName === "heading";
+    return parts.join(inline ? "" : BLOCK_SEPARATOR);
+  }
+  return "";
+}
+
+/**
+ * The notes split where a reader would split them: at each top-level heading,
+ * with every upload's section on its own. Empty sections, and upload sections
+ * still showing their placeholder, are left out.
+ */
+export function notesSections(fragment: Y.XmlFragment): NotesSection[] {
+  const sections: NotesSection[] = [];
+  let current: NotesSection = { key: "top", title: "Notes", text: "" };
+  let headings = 0;
+  const close = () => {
+    current.text = current.text.trim();
+    if (current.text) sections.push(current);
+  };
+
+  for (const child of fragment.toArray()) {
+    if (!(child instanceof Y.XmlElement)) continue;
+    if (child.nodeName === SECTION_NODE) {
+      if (isPlaceholder(child)) continue;
+      sections.push({
+        key: `u:${child.getAttribute("mediaItemId") ?? ""}`,
+        title: String(child.getAttribute("title") ?? "Upload"),
+        text: plainText(child).trim(),
+      });
+      continue;
+    }
+    if (child.nodeName === "heading") {
+      close();
+      current = { key: `h:${headings}`, title: plainText(child).trim() || "Untitled", text: "" };
+      headings += 1;
+      continue;
+    }
+    const text = plainText(child).trim();
+    if (text) current.text += `${text}\n`;
+  }
+  close();
+  return sections.filter((section) => section.text);
+}
+
+// --- documents: a room holds several ------------------------------------------------
+
+/**
+ * Every room has one main document, "Room notes", where uploads write their
+ * sections; people add more. A document is addressed by a key: the main one's
+ * is the room id itself (so notes from before there were several still load),
+ * any other's is `<roomId>:<docId>`. Room ids never contain a colon.
+ */
+export const MAIN_DOC_ID = "main";
+
+export function docKey(roomId: string, docId: string = MAIN_DOC_ID): string {
+  return docId === MAIN_DOC_ID ? roomId : `${roomId}:${docId}`;
+}
+
+export function parseDocKey(key: string): { roomId: string; docId: string } {
+  const at = key.indexOf(":");
+  return at === -1 ? { roomId: key, docId: MAIN_DOC_ID } : { roomId: key.slice(0, at), docId: key.slice(at + 1) };
+}
+
+/** A document id as the gateway makes them, or the main one's. */
+export const isDocId = (value: string): boolean => value === MAIN_DOC_ID || /^[A-Za-z0-9_-]{8,32}$/.test(value);

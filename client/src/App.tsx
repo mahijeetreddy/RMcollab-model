@@ -5,6 +5,9 @@ import { RoomView } from "./features/room/RoomView";
 import { ConnectionIndicator } from "./features/room/ConnectionIndicator";
 import { ThemeToggle } from "./theme/ThemeToggle";
 import { useTheme } from "./theme/useTheme";
+import { formatSessionCode } from "@rmcollab/shared";
+import { forgetSession, rememberSession } from "./lib/recent";
+import { WaitingScreen } from "./features/room/Admission";
 import { useRealtime, type Credentials } from "./ws/useRealtime";
 
 const STORAGE_KEY = "rmcollab.credentials";
@@ -20,7 +23,12 @@ function loadCredentials(): Credentials | null {
       typeof (parsed as Credentials).sessionCode === "string" &&
       typeof (parsed as Credentials).displayName === "string"
     ) {
-      return parsed as Credentials;
+      const participantId = (parsed as Credentials).participantId;
+      return {
+        sessionCode: (parsed as Credentials).sessionCode,
+        displayName: (parsed as Credentials).displayName,
+        ...(typeof participantId === "string" ? { participantId } : {}),
+      };
     }
   } catch {
     // Unreadable storage is not worth failing a page load over.
@@ -41,22 +49,78 @@ export default function App() {
     }
   }, [credentials]);
 
+  // Only the code and name start a connection; the participant id is read when
+  // one starts, so learning it (below) does not reconnect.
   const stable = useMemo<Credentials | null>(
     () =>
       credentials
-        ? { sessionCode: credentials.sessionCode, displayName: credentials.displayName }
+        ? {
+            sessionCode: credentials.sessionCode,
+            displayName: credentials.displayName,
+            ...(credentials.participantId ? { participantId: credentials.participantId } : {}),
+          }
         : null,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [credentials?.sessionCode, credentials?.displayName],
   );
 
   const realtime = useRealtime(stable);
+
+  // Removed from the session by its owner: back to the start, told why, and
+  // the session dropped from Recent sessions - rejoining it as this person is
+  // no longer possible.
+  const [landingNotice, setLandingNotice] = useState<string | null>(null);
+  const removedFromSession = realtime.state.removed?.scope === "session" ? realtime.state.removed : null;
+  const turnedAway = realtime.state.admission?.status === "denied" ? realtime.state.admission : null;
+  useEffect(() => {
+    if (!turnedAway || !stable) return;
+    forgetSession(stable.sessionCode, realtime.state.me?.id);
+    setLandingNotice(`${turnedAway.byName} didn't let you into the session.`);
+    setCredentials(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [turnedAway]);
+  useEffect(() => {
+    if (!removedFromSession || !stable) return;
+    forgetSession(stable.sessionCode, realtime.state.me?.id);
+    setLandingNotice(`${removedFromSession.byName} removed you from the session.`);
+    setCredentials(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [removedFromSession?.at]);
+
+  // Once joined: remember who we are here, so a reload or Recent sessions
+  // comes back as the same person rather than a stranger with the same name.
+  const joinedCode = realtime.state.session?.code;
+  const joinedName = realtime.state.session?.name ?? null;
+  const me = realtime.state.me;
+  useEffect(() => {
+    if (!joinedCode || !me) return;
+    rememberSession({ code: joinedCode, name: joinedName, displayName: me.displayName, participantId: me.id });
+    setCredentials((current) =>
+      current && current.participantId !== me.id ? { ...current, participantId: me.id } : current,
+    );
+  }, [joinedCode, joinedName, me]);
   const leave = useCallback(() => setCredentials(null), []);
 
   if (!stable) {
-    return <LandingView onEnter={setCredentials} theme={theme} />;
+    return (
+      <LandingView
+        onEnter={(next) => {
+          setLandingNotice(null);
+          setCredentials(next);
+        }}
+        theme={theme}
+        notice={landingNotice}
+      />
+    );
   }
 
   const { state, status, attempt, reconnectNow, clearError } = realtime;
+
+  if (state.admission?.status === "waiting") {
+    return (
+      <WaitingScreen sessionName={state.admission.sessionName} ownerName={state.admission.ownerName} onCancel={leave} />
+    );
+  }
 
   return (
     <div className="app">
@@ -80,7 +144,7 @@ export default function App() {
         <div className="header-meta">
           <span id="session-code-label">Session</span>
           <span className="code-chip" aria-labelledby="session-code-label">
-            {state.session?.code ?? stable.sessionCode}
+            {formatSessionCode(state.session?.code ?? stable.sessionCode)}
           </span>
         </div>
 
@@ -119,7 +183,9 @@ export default function App() {
         </div>
       )}
 
-      <RoomView realtime={realtime} sessionCode={stable.sessionCode} />
+      {/* The session's current code, not the one joined with: a removal changes it,
+          and sharing or making rooms with the old one would fail. */}
+      <RoomView realtime={realtime} sessionCode={state.session?.code ?? stable.sessionCode} />
     </div>
   );
 }

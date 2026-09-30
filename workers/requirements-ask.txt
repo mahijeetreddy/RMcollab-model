@@ -1,0 +1,4 @@
+# Ask the room: local text embeddings (bge-small-en-v1.5 on ONNX Runtime, CPU).
+# Installed into the small worker image only; the pools that answer questions
+# run that image, and the GPU image's numpy/torch pins stay untouched.
+fastembed==0.8.1

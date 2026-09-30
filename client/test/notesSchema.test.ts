@@ -177,3 +177,26 @@ describe("textToBlocks", () => {
     expect(JSON.stringify(blocks)).not.toContain("last");
   });
 });
+
+describe("a section through HTML (copy and paste, printing)", () => {
+  it("keeps every attribute, camelCase ones included", () => {
+    const type = schema.nodes[SECTION_NODE]!;
+    const node = type.create(META, schema.nodes.paragraph!.create(null, schema.text("hi")));
+    // toDOM returns the render spec; no DOM is needed to read its attributes.
+    const [, attrs] = type.spec.toDOM!(node) as [string, Record<string, string>, number];
+    expect(attrs).toMatchObject({
+      "data-media-item-id": "mi-1",
+      "data-media-type": "audio",
+      "data-title": "lecture.mp3",
+      "data-author": "Alice",
+      "data-created-at": String(META.createdAt),
+      "data-status": "processing",
+    });
+
+    // And back: what a paste reads from those attributes.
+    const element = { getAttribute: (name: string) => attrs[name] ?? null } as unknown as HTMLElement;
+    const rule = type.spec.parseDOM![0]!;
+    const parsed = (rule as { getAttrs: (el: HTMLElement) => Record<string, unknown> }).getAttrs(element);
+    expect(parsed).toMatchObject({ mediaItemId: "mi-1", mediaType: "audio", title: "lecture.mp3", author: "Alice", createdAt: META.createdAt, status: "processing" });
+  });
+});

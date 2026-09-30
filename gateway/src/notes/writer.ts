@@ -1,16 +1,18 @@
-import type { EnhancementJob, MediaItem } from "@rmcollab/shared";
+import { mediaTitle, type EnhancementJob, type MediaItem } from "@rmcollab/shared";
 import {
   createSection,
   fillSection,
   findSection,
+  blockNode,
   NOTES_FIELD,
   paragraph,
+  SECTION_PLACEHOLDER,
   quote,
   summaryToBlocks,
   textToBlocks,
   type NoteBlock,
 } from "@rmcollab/shared/notes";
-import type * as Y from "yjs";
+import * as Y from "yjs";
 import type { ArtifactText } from "../db/repositories.js";
 
 /**
@@ -38,11 +40,12 @@ export interface NotesEditor {
   edit(roomId: string, change: (doc: Y.Doc) => void): Promise<void>;
 }
 
-const LABEL: Record<string, string> = { text: "Text", image: "Image", audio: "Recording", video: "Video" };
-
 export function sectionTitle(item: MediaItem): string {
-  return item.originalFilename ?? `${LABEL[item.mediaType] ?? "Upload"} from ${item.uploaderName}`;
+  return mediaTitle(item);
 }
+
+/** What the writer puts in a section when its job fails, so a retry can tell it from a person's words. */
+export const FAILED_PREFIX = "This upload could not be processed: ";
 
 const STAMP = /^\[\d+:\d{2}:\d{2}\]\s*/;
 
@@ -57,7 +60,7 @@ function formatDuration(seconds: number): string {
 /** What a finished job adds to its section. */
 export function resultBlocks(job: EnhancementJob, mediaType: string, texts: ArtifactText[]): NoteBlock[] {
   if (job.status === "failed") {
-    return [paragraph(`This upload could not be processed: ${job.error ?? "no reason was given"}.`, true)];
+    return [paragraph(`${FAILED_PREFIX}${job.error ?? "no reason was given"}.`, true)];
   }
 
   const blocks: NoteBlock[] = [];
@@ -92,6 +95,19 @@ export function resultBlocks(job: EnhancementJob, mediaType: string, texts: Arti
   return blocks;
 }
 
+/** The one paragraph a section holds after its job failed, and nobody has typed in it since. */
+function onlyTheFailure(section: Y.XmlElement): boolean {
+  const children = section.toArray();
+  if (children.length !== 1) return false;
+  const only = children[0];
+  if (!(only instanceof Y.XmlElement) || only.nodeName !== "paragraph") return false;
+  return only
+    .toArray()
+    .map((part) => (part instanceof Y.XmlText ? part.toString().replace(/<[^>]+>/g, "") : ""))
+    .join("")
+    .startsWith(FAILED_PREFIX);
+}
+
 export class NotesWriter {
   constructor(
     private readonly editor: NotesEditor,
@@ -124,6 +140,51 @@ export class NotesWriter {
       // The notes are a view of the room's work, not part of accepting it: a
       // failure here must never fail the upload.
       this.log(`could not add a section for ${item.id}`, err);
+    }
+  }
+
+  /** An upload retried after failing: its section waits again. Words a person added stay. */
+  async retrying(item: MediaItem): Promise<void> {
+    try {
+      await this.editor.edit(item.roomId, (doc) => {
+        const section = findSection(doc.getXmlFragment(NOTES_FIELD), item.id);
+        if (!section) return;
+        section.setAttribute("status", "processing");
+        if (onlyTheFailure(section)) {
+          section.delete(0, section.length);
+          section.insert(0, [blockNode(paragraph(SECTION_PLACEHOLDER, true))]);
+        }
+      });
+    } catch (err) {
+      this.log(`could not reset the section for ${item.id}`, err);
+    }
+  }
+
+  /** An upload renamed: its section's title follows. */
+  async renamed(item: MediaItem): Promise<void> {
+    try {
+      await this.editor.edit(item.roomId, (doc) => {
+        findSection(doc.getXmlFragment(NOTES_FIELD), item.id)?.setAttribute("title", sectionTitle(item));
+      });
+    } catch (err) {
+      this.log(`could not retitle the section for ${item.id}`, err);
+    }
+  }
+
+  /**
+   * An upload deleted: its section goes too. It stays marked as written, so a
+   * completion still in flight cannot bring it back.
+   */
+  async removed(roomId: string, mediaItemId: string): Promise<void> {
+    try {
+      await this.editor.edit(roomId, (doc) => {
+        const notes = doc.getXmlFragment(NOTES_FIELD);
+        const section = findSection(notes, mediaItemId);
+        doc.getMap<number>(WRITTEN_SECTIONS).set(mediaItemId, Date.now());
+        if (section) notes.delete(notes.toArray().indexOf(section), 1);
+      });
+    } catch (err) {
+      this.log(`could not remove the section for ${mediaItemId}`, err);
     }
   }
 

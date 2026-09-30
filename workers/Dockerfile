@@ -2,8 +2,8 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-COPY workers/requirements.txt workers/requirements.txt
-RUN pip install --no-cache-dir -r workers/requirements.txt
+COPY workers/requirements.txt workers/requirements-ask.txt workers/requirements-errors.txt workers/
+RUN pip install --no-cache-dir -r workers/requirements.txt -r workers/requirements-ask.txt -r workers/requirements-errors.txt
 
 COPY workers workers
 

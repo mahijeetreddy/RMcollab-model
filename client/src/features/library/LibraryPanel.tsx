@@ -1,7 +1,6 @@
 import { useEffect, useId, useState } from "react";
-import type { ArtifactKind, LibraryEntry } from "@rmcollab/shared";
+import { mediaTitle, type ArtifactKind, type LibraryEntry } from "@rmcollab/shared";
 import { api, resolveFileUrl } from "../../api/client";
-import { MEDIA_TYPE_LABELS } from "../../lib/format";
 import { parseSnippet } from "../../lib/snippet";
 import { formatDuration } from "../../lib/transcript";
 
@@ -130,8 +129,7 @@ export function LibraryPanel({ roomId, participantId, refreshKey, onOpen }: Prop
       ) : (
         <ul className="library-list">
           {visible.map((entry) => {
-            const name =
-              entry.originalFilename ?? `${MEDIA_TYPE_LABELS[entry.mediaType]} upload`;
+            const name = mediaTitle({ ...entry, title: entry.title ?? null });
             const thumb =
               entry.artifact.kind === "enhanced" && entry.mediaType === "image"
                 ? resolveFileUrl(entry.artifact.url)

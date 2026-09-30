@@ -22,7 +22,6 @@
 # key into a layer that outlives the key.
 .env
 .env.*
-!.env.example
 
 # Runtime data, not source. storage/ holds users' uploaded recordings and images.
 storage

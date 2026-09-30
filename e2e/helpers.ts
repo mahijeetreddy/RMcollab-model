@@ -34,7 +34,16 @@ export class Participant {
   id = "";
   private constructor(private readonly socket: WebSocket) {}
 
-  static async join(sessionCode: string, displayName: string): Promise<Participant> {
+  /** `extra` goes into the join itself: a participantId to rejoin as, a roomId to return to. */
+  static async join(sessionCode: string, displayName: string, extra: Record<string, unknown> = {}): Promise<Participant> {
+    const participant = await Participant.connect();
+    participant.send({ type: "join_session", sessionCode, displayName, ...extra });
+    await participant.waitFor((e) => e.type === "room_state");
+    return participant;
+  }
+
+  /** Connected, and nothing sent yet: for tests that decide the first frames themselves. */
+  static async connect(): Promise<Participant> {
     const socket = new WebSocket(WS);
     const participant = new Participant(socket);
     socket.on("message", (raw) => {
@@ -48,8 +57,6 @@ export class Participant {
       socket.once("open", () => resolve());
       socket.once("error", reject);
     });
-    participant.send({ type: "join_session", sessionCode, displayName });
-    await participant.waitFor((e) => e.type === "room_state");
     return participant;
   }
 

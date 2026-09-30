@@ -39,6 +39,20 @@ export const config = {
     backoffBaseMs: num(process.env.WEBHOOK_BACKOFF_BASE_MS, 1000),
     backoffCapMs: num(process.env.WEBHOOK_BACKOFF_CAP_MS, 60_000),
   },
+  // Abuse and cost limits (see limits.ts). Anyone with a session code can
+  // upload, and every upload is GPU or model work.
+  limits: {
+    uploadsPerPersonPerMinute: num(process.env.LIMIT_UPLOADS_PER_MINUTE, 10),
+    uploadsPerPersonPerHour: num(process.env.LIMIT_UPLOADS_PER_HOUR, 60),
+    uploadsPerSessionPerHour: num(process.env.LIMIT_SESSION_UPLOADS_PER_HOUR, 200),
+    activeJobsPerSession: num(process.env.LIMIT_ACTIVE_JOBS_PER_SESSION, 12),
+    roomStorageBytes: num(process.env.LIMIT_ROOM_STORAGE_MB, 500) * 1024 * 1024,
+    sessionStorageBytes: num(process.env.LIMIT_SESSION_STORAGE_MB, 2048) * 1024 * 1024,
+    demosPerAddressPerHour: num(process.env.LIMIT_DEMOS_PER_HOUR, 6),
+    codeMissesPer10Minutes: num(process.env.LIMIT_CODE_MISSES_PER_10_MIN, 20),
+  },
+  // Sessions nobody has touched in this long are deleted, files and all.
+  sessionTtlMs: num(process.env.SESSION_TTL_DAYS, 3) * 24 * 60 * 60 * 1000,
 } as const;
 
 export type Config = typeof config;

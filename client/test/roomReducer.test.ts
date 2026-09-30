@@ -47,6 +47,7 @@ function mediaItem(overrides: Partial<MediaItem> = {}): MediaItem {
     uploaderName: "Grace",
     mediaType: "image",
     originalFilename: "cat.png",
+    title: null,
     originalUrl: "/files/cat.png",
     mimeType: "image/png",
     sizeBytes: 1024,
@@ -429,5 +430,48 @@ describe("error", () => {
   it("is cleared by clear_error", () => {
     const errored = apply(syncedState(), { type: "error", code: "x", message: "y" });
     expect(roomReducer(errored, { type: "clear_error" }).lastError).toBeNull();
+  });
+});
+
+describe("waiting room", () => {
+  const session = { id: "s-1", code: "ABCDE23456", name: "Biology", createdAt: 1, waitingRoom: true };
+
+  it("holds a newcomer on the waiting screen until they are let in", () => {
+    let state = apply(initialRoomState, { type: "admission_waiting", sessionName: "Biology", ownerName: "Ada" });
+    expect(state.admission).toEqual({ status: "waiting", sessionName: "Biology", ownerName: "Ada" });
+    // Being let in is followed by the ordinary session_joined, which clears it.
+    state = apply(state, { type: "admission_decided", sessionId: "s-1", participantId: "p-9", admitted: true, byName: "Ada" });
+    expect(state.admission?.status).toBe("waiting");
+    state = apply(state, { type: "session_joined", session, participant: participant(), rooms: [] });
+    expect(state.admission).toBeNull();
+  });
+
+  it("tells a newcomer who was turned away", () => {
+    let state = apply(initialRoomState, { type: "admission_waiting", sessionName: null, ownerName: null });
+    state = apply(state, { type: "admission_decided", sessionId: "s-1", participantId: "p-9", admitted: false, byName: "Ada" });
+    expect(state.admission).toEqual({ status: "denied", byName: "Ada" });
+  });
+
+  it("lists requests for the owner once each, and drops answered ones", () => {
+    const request = { type: "admission_requested" as const, sessionId: "s-1", participant: { id: "p-9", displayName: "Bo" } };
+    let state = apply(initialRoomState, request);
+    state = apply(state, request);
+    expect(state.waitingList).toEqual([{ id: "p-9", displayName: "Bo" }]);
+    state = apply(state, { type: "admission_decided", sessionId: "s-1", participantId: "p-9", admitted: true, byName: "Ada" });
+    expect(state.waitingList).toEqual([]);
+    expect(state.admissionDecided).toEqual(["p-9"]);
+    expect(state.admission).toBeNull();
+  });
+
+  it("drops a request from the owner's list when its sender gives up waiting", () => {
+    let state = apply(initialRoomState, { type: "admission_requested", sessionId: "s-1", participant: { id: "p-9", displayName: "Bo" } });
+    state = apply(state, { type: "admission_withdrawn", sessionId: "s-1", participantId: "p-9" });
+    expect(state.waitingList).toEqual([]);
+    expect(state.admissionDecided).toContain("p-9");
+  });
+
+  it("takes a changed code from session_updated", () => {
+    const state = apply(initialRoomState, { type: "session_updated", session: { ...session, code: "ZZZZZ22222" } });
+    expect(state.session?.code).toBe("ZZZZZ22222");
   });
 });

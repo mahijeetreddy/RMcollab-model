@@ -10,8 +10,9 @@ from celery.signals import worker_process_init, worker_ready
 from kombu import Queue
 
 from workers.common.config import get_config
-from workers.common.contracts import QUEUES, TASK_ENHANCE
+from workers.common.contracts import QUEUE_ASK, QUEUE_EMBED, QUEUES, TASK_ENHANCE
 from workers.common import llm
+from workers.common.errors import start_error_tracking
 from workers.common.events import reset_redis
 from workers.common.strategies import load_strategies, restrict_loading
 
@@ -28,13 +29,21 @@ def route_task(name: str, args: Any, kwargs: dict[str, Any] | None, options: Any
     return {"queue": queue} if queue else None
 
 
+# Before the app exists, so the Celery integration sees every task. A no-op without SENTRY_DSN.
+start_error_tracking()
+
 _config = get_config()
+# The Ask pool runs threads, not processes: its work is waiting on a model API or
+# on ONNX Runtime (which releases the GIL), and threads share one copy of the
+# embedding model instead of loading one per process. worker_process_init does
+# not fire for threads, so it warms up in worker_ready instead.
+_ASK_POOL = bool({QUEUE_ASK, QUEUE_EMBED} & set(_config.celery_queues))
 
 app = Celery(
     "rmcollab",
     broker=_config.redis_url,
     backend=_config.redis_url,
-    include=("workers.tasks",),
+    include=("workers.tasks", "workers.ask_tasks"),
 )
 
 app.conf.update(
@@ -56,9 +65,11 @@ app.conf.update(
     broker_connection_retry_on_startup=True,
     worker_cancel_long_running_tasks_on_connection_loss=True,
     task_default_queue=QUEUES["text"],
-    task_queues=tuple(Queue(queue) for queue in QUEUES.values()),
+    task_queues=tuple(Queue(queue) for queue in (*QUEUES.values(), QUEUE_ASK, QUEUE_EMBED)),
     task_routes=(route_task,),
 )
+if _ASK_POOL:
+    app.conf.worker_pool = "threads"
 
 
 @worker_process_init.connect
@@ -79,3 +90,9 @@ def _on_worker_ready(**_: Any) -> None:
     from workers.common.advertise import start_heartbeat
 
     start_heartbeat()
+    if _ASK_POOL:
+        # Threads share this process, so this is the one place to load the model.
+        from workers.common import embeddings
+
+        llm.warm()
+        embeddings.warm()

@@ -5,8 +5,7 @@ import type {
   Participant,
   Room,
   ServerEvent,
-  Session,
-} from "@rmcollab/shared";
+  Session, RoomDocument } from "@rmcollab/shared";
 
 export interface RealtimeError {
   code: string;
@@ -29,6 +28,15 @@ export interface RoomState {
    *  they arrived so a stale one can be pruned if the sender goes quiet. */
   typing: Record<string, { displayName: string; at: number }>;
   lastError: RealtimeError | null;
+  /** Waiting room: set while this browser waits to be let in, or once it was turned away. */
+  admission: { status: "waiting"; sessionName: string | null; ownerName: string | null } | { status: "denied"; byName: string } | null;
+  /** For the owner: who is waiting, and whose request has been answered. */
+  waitingList: { id: string; displayName: string }[];
+  admissionDecided: string[];
+  /** The room's documents, as last announced; null until the first announcement. */
+  documents: RoomDocument[] | null;
+  /** Set when the room's owner removed us; RoomView and App act on it. */
+  removed: { scope: "room" | "session"; roomId: string; byName: string; at: number } | null;
 }
 
 export const initialRoomState: RoomState = {
@@ -42,6 +50,11 @@ export const initialRoomState: RoomState = {
   media: [],
   typing: {},
   lastError: null,
+  admission: null,
+  waitingList: [],
+  admissionDecided: [],
+  documents: null,
+  removed: null,
 };
 
 export type RoomAction =
@@ -96,6 +109,7 @@ function applyServerEvent(state: RoomState, event: ServerEvent): RoomState {
     case "session_joined":
       return {
         ...state,
+        admission: null,
         session: event.session,
         me: event.participant,
         rooms: sortRooms(event.rooms),
@@ -115,6 +129,7 @@ function applyServerEvent(state: RoomState, event: ServerEvent): RoomState {
         // (a missing or wrong room code), so the prompt must not linger.
         lastError: null,
         participants: event.participants,
+        documents: state.activeRoomId === event.roomId ? state.documents : null,
         chat: [...event.chatHistory].sort((a, b) => a.createdAt - b.createdAt),
         media: [...event.media].sort((a, b) => b.mediaItem.createdAt - a.mediaItem.createdAt),
       };
@@ -131,6 +146,48 @@ function applyServerEvent(state: RoomState, event: ServerEvent): RoomState {
     case "participant_joined":
       if (!isCurrentRoom(state, event.roomId)) return state;
       return { ...state, participants: upsertParticipant(state.participants, event.participant) };
+
+    case "session_updated":
+      return { ...state, session: event.session };
+
+    case "admission_waiting":
+      return { ...state, admission: { status: "waiting", sessionName: event.sessionName, ownerName: event.ownerName } };
+
+    case "admission_requested":
+      if (state.waitingList.some((p) => p.id === event.participant.id)) return state;
+      return {
+        ...state,
+        waitingList: [...state.waitingList, event.participant],
+        admissionDecided: state.admissionDecided.filter((id) => id !== event.participant.id),
+      };
+
+    case "admission_decided":
+      // While this browser waits, the only decision it hears is its own.
+      if (state.admission?.status === "waiting") {
+        return event.admitted ? state : { ...state, admission: { status: "denied", byName: event.byName } };
+      }
+      return {
+        ...state,
+        waitingList: state.waitingList.filter((p) => p.id !== event.participantId),
+        admissionDecided: [...state.admissionDecided, event.participantId],
+      };
+
+    case "admission_withdrawn":
+      return {
+        ...state,
+        waitingList: state.waitingList.filter((p) => p.id !== event.participantId),
+        admissionDecided: [...state.admissionDecided, event.participantId],
+      };
+
+    case "documents_updated":
+      if (!isCurrentRoom(state, event.roomId)) return state;
+      return { ...state, documents: event.documents };
+
+    case "participant_removed":
+      if (state.me && event.participantId === state.me.id) {
+        return { ...state, removed: { scope: event.scope, roomId: event.roomId, byName: event.byName, at: Date.now() } };
+      }
+      return { ...state, participants: state.participants.filter((p) => p.id !== event.participantId) };
 
     case "participant_left":
       if (!isCurrentRoom(state, event.roomId)) return state;
@@ -172,6 +229,29 @@ function applyServerEvent(state: RoomState, event: ServerEvent): RoomState {
         media: [{ mediaItem: event.mediaItem, job: event.job }, ...state.media],
       };
     }
+
+    case "media_updated": {
+      if (!isCurrentRoom(state, event.roomId)) return state;
+      return {
+        ...state,
+        media: state.media.map((entry) =>
+          entry.mediaItem.id === event.mediaItem.id
+            ? { mediaItem: event.mediaItem, job: event.job ?? entry.job }
+            : entry,
+        ),
+      };
+    }
+
+    case "media_deleted": {
+      if (!isCurrentRoom(state, event.roomId)) return state;
+      return { ...state, media: state.media.filter((entry) => entry.mediaItem.id !== event.mediaItemId) };
+    }
+
+    case "room_deleted":
+      // The room list update that follows moves anyone inside to the main room
+      // (RoomView); nothing of the gone room is worth keeping in the meantime.
+      if (!isCurrentRoom(state, event.roomId)) return state;
+      return { ...state, media: [], chat: [], synced: false };
 
     case "job_status_update": {
       if (!isCurrentRoom(state, event.roomId)) return state;
@@ -216,6 +296,13 @@ function applyServerEvent(state: RoomState, event: ServerEvent): RoomState {
     case "doc":
       // Routed to the notes editor before the reducer (useRealtime); the room's
       // document lives in its CRDT, not in this state.
+      return state;
+
+    case "ask_sources":
+    case "ask_delta":
+    case "ask_done":
+      // Also routed before the reducer, to the Ask panel: an answer is private
+      // to its asker and arrives in pieces, so it is not room state.
       return state;
 
     default: {

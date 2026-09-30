@@ -4,8 +4,7 @@ import type {
   MediaType,
   Room,
   Session,
-  StrategyDescriptor,
-} from "@rmcollab/shared";
+  StrategyDescriptor, RoomDocument } from "@rmcollab/shared";
 import type { Metrics } from "../features/cluster/ClusterPanel";
 import {
   arrayOf,
@@ -115,6 +114,17 @@ async function requestIn<T>(
   return value;
 }
 
+/** A request answered with no body (204), where only success matters. */
+async function send(path: string, init: RequestInit): Promise<void> {
+  let response: Response;
+  try {
+    response = await fetch(`${GATEWAY_HTTP.replace(/\/$/, "")}${path}`, init);
+  } catch {
+    throw new ApiError(0, `Cannot reach gateway at ${GATEWAY_HTTP}`, "network_error");
+  }
+  if (!response.ok) throw await readError(response);
+}
+
 function json(body: unknown): RequestInit {
   return {
     method: "POST",
@@ -123,13 +133,119 @@ function json(body: unknown): RequestInit {
   };
 }
 
+const media = (roomId: string, mediaItemId: string) =>
+  `/api/rooms/${encodeURIComponent(roomId)}/media/${encodeURIComponent(mediaItemId)}`;
+
 export const api = {
+  /** A session already holding analysed sample material, to try the app with. */
+  createDemo(): Promise<Session> {
+    return requestIn("/api/demo", "session", isSession, json({}));
+  },
+
+  async listDocuments(roomId: string, participantId: string): Promise<RoomDocument[]> {
+    const { body } = await fetchJson(
+      `/api/rooms/${encodeURIComponent(roomId)}/documents?participantId=${encodeURIComponent(participantId)}`,
+    );
+    return (body as { documents: RoomDocument[] }).documents;
+  },
+
+  async createDocument(roomId: string, participantId: string, title: string): Promise<RoomDocument> {
+    const { body } = await fetchJson(`/api/rooms/${encodeURIComponent(roomId)}/documents`, json({ participantId, title }));
+    return (body as { document: RoomDocument }).document;
+  },
+
+  renameDocument(roomId: string, docId: string, participantId: string, title: string): Promise<unknown> {
+    return fetchJson(`/api/rooms/${encodeURIComponent(roomId)}/documents/${encodeURIComponent(docId)}`, {
+      ...json({ participantId, title }),
+      method: "PATCH",
+    });
+  },
+
+  deleteDocument(roomId: string, docId: string, participantId: string): Promise<void> {
+    return send(
+      `/api/rooms/${encodeURIComponent(roomId)}/documents/${encodeURIComponent(docId)}?participantId=${encodeURIComponent(participantId)}`,
+      { method: "DELETE" },
+    );
+  },
+
+  async listVersions(roomId: string, participantId: string, docId: string) {
+    const { body } = await fetchJson(
+      `/api/rooms/${encodeURIComponent(roomId)}/documents/${encodeURIComponent(docId)}/versions?participantId=${encodeURIComponent(participantId)}`,
+    );
+    return (body as { versions: { id: string; createdAt: number; reason: string; words: number }[] }).versions;
+  },
+
+  async getVersion(roomId: string, participantId: string, docId: string, versionId: string) {
+    const { body } = await fetchJson(
+      `/api/rooms/${encodeURIComponent(roomId)}/documents/${encodeURIComponent(docId)}/versions/${encodeURIComponent(versionId)}?participantId=${encodeURIComponent(participantId)}`,
+    );
+    return body as {
+      version: { id: string; createdAt: number; reason: string; words: number };
+      sections: { title: string; text: string }[];
+    };
+  },
+
+  restoreVersion(roomId: string, participantId: string, docId: string, versionId: string): Promise<unknown> {
+    return fetchJson(
+      `/api/rooms/${encodeURIComponent(roomId)}/documents/${encodeURIComponent(docId)}/versions/${encodeURIComponent(versionId)}/restore`,
+      json({ participantId }),
+    );
+  },
+
+  renameMedia(roomId: string, mediaItemId: string, participantId: string, title: string): Promise<unknown> {
+    return fetchJson(media(roomId, mediaItemId), { ...json({ participantId, title }), method: "PATCH" });
+  },
+
+  retryMedia(roomId: string, mediaItemId: string, participantId: string): Promise<unknown> {
+    return fetchJson(`${media(roomId, mediaItemId)}/retry`, json({ participantId }));
+  },
+
+  deleteMedia(roomId: string, mediaItemId: string, participantId: string): Promise<void> {
+    return send(`${media(roomId, mediaItemId)}?participantId=${encodeURIComponent(participantId)}`, { method: "DELETE" });
+  },
+
+  /** Resolves with the session's new code when the removal was from the whole session. */
+  async removeParticipant(roomId: string, targetId: string, participantId: string): Promise<string | null> {
+    const response = await fetch(
+      `${GATEWAY_HTTP.replace(/\/$/, "")}/api/rooms/${encodeURIComponent(roomId)}/participants/${encodeURIComponent(targetId)}/remove`,
+      json({ participantId }),
+    ).catch(() => {
+      throw new ApiError(0, `Cannot reach gateway at ${GATEWAY_HTTP}`, "network_error");
+    });
+    if (!response.ok) throw await readError(response);
+    if (response.status === 204) return null;
+    const body = (await response.json().catch(() => ({}))) as { newCode?: unknown };
+    return typeof body.newCode === "string" ? body.newCode : null;
+  },
+
+  deleteRoom(roomId: string, participantId: string): Promise<void> {
+    return send(`/api/rooms/${encodeURIComponent(roomId)}?participantId=${encodeURIComponent(participantId)}`, {
+      method: "DELETE",
+    });
+  },
+
   createSession(name?: string): Promise<Session> {
     return requestIn("/api/sessions", "session", isSession, json(name ? { name } : {}));
   },
 
-  getSession(code: string): Promise<Session> {
-    return requestIn(`/api/sessions/${encodeURIComponent(code)}`, "session", isSession);
+  getSession(code: string, participantId?: string): Promise<Session> {
+    const who = participantId ? `?participantId=${encodeURIComponent(participantId)}` : "";
+    return requestIn(`/api/sessions/${encodeURIComponent(code)}${who}`, "session", isSession);
+  },
+
+  setWaitingRoom(code: string, participantId: string, waitingRoom: boolean): Promise<unknown> {
+    return fetchJson(`/api/sessions/${encodeURIComponent(code)}`, { ...json({ participantId, waitingRoom }), method: "PATCH" });
+  },
+
+  async waitingList(code: string, participantId: string): Promise<{ id: string; displayName: string }[]> {
+    const { body } = await fetchJson(
+      `/api/sessions/${encodeURIComponent(code)}/waiting?participantId=${encodeURIComponent(participantId)}`,
+    );
+    return (body as { waiting: { id: string; displayName: string }[] }).waiting;
+  },
+
+  decideAdmission(code: string, participantId: string, targetId: string, admit: boolean): Promise<void> {
+    return send(`/api/sessions/${encodeURIComponent(code)}/admissions`, json({ participantId, targetId, admit }));
   },
 
   listRooms(code: string): Promise<Room[]> {

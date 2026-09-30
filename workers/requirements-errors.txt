@@ -1,0 +1,4 @@
+# Error tracking; inert unless SENTRY_DSN is set (workers/common/errors.py).
+# Its own file so the GPU image installs it after torch: adding it to
+# requirements.txt would invalidate the cached CUDA layers below that one.
+sentry-sdk[celery]>=2.40,<3

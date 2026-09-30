@@ -2,9 +2,9 @@ import { Router } from "express";
 import { z } from "zod";
 import {
   createRoom,
-  getParticipant,
   getRoomCodeForOwner,
   getSessionByCode,
+  isAdmittedMember,
   listRooms,
 } from "../../db/repositories.js";
 import { pubsub } from "../../ws/pubsub.js";
@@ -18,32 +18,37 @@ const createRoomSchema = z.object({
   // Optional: locks the room so only people given this code can enter.
   accessCode: z.string().trim().min(3).max(64).optional(),
   // Who created it: they become the owner and can reveal the code to share it.
-  participantId: z.string().trim().min(1).max(64).optional(),
+  participantId: z.string().trim().min(1).max(64),
 });
 
 roomsRouter.post(
   "/api/sessions/:code/rooms",
   asyncHandler(async (req, res) => {
-    const session = await getSessionByCode(routeParam(req, "code"));
+    const parsed = createRoomSchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ error: "invalid_body", message: "name and participantId are required." });
+      return;
+    }
+    // By its participant id, a member still finds the session after its code
+    // changed (a removal retires the old one).
+    const session = await getSessionByCode(routeParam(req, "code"), parsed.data.participantId);
     if (!session) {
       res.status(404).json({ error: "session_not_found" });
       return;
     }
-    const parsed = createRoomSchema.safeParse(req.body ?? {});
-    if (!parsed.success) {
-      res.status(400).json({ error: "invalid_body", message: "name is required." });
+    // Only someone in the session makes rooms in it: not a passer-by holding
+    // the code, not someone removed from it, not someone still waiting to be let in.
+    if (!(await isAdmittedMember(session.id, parsed.data.participantId))) {
+      res.status(403).json({ error: "not_in_session", message: "Join the session first." });
       return;
     }
 
-    const owner = parsed.data.participantId
-      ? await getParticipant(parsed.data.participantId)
-      : null;
     const room = await createRoom(
       session.id,
       parsed.data.name,
       false,
       parsed.data.accessCode ?? null,
-      owner && owner.sessionId === session.id ? owner.id : null,
+      parsed.data.participantId,
     );
     const rooms = await listRooms(session.id);
     await pubsub.publishToSession(session.id, {

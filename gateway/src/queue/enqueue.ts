@@ -24,6 +24,11 @@ export async function enqueueEnhanceTask(payload: EnhanceTaskPayload, queue?: st
   });
 }
 
+/** Any other task: Ask the room's embedding and answering. */
+export async function enqueueTask(taskName: string, queue: string, kwargs: Record<string, unknown>): Promise<string> {
+  return sendTask(client(), { taskName, queue, kwargs });
+}
+
 export async function closeQueue(): Promise<void> {
   if (producer) {
     await producer.quit();

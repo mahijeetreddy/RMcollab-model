@@ -108,4 +108,34 @@ test.describe("private breakout rooms", () => {
     owner.close();
     outsider.close();
   });
+
+  test("a reconnect goes straight back to the breakout room it was in", async () => {
+    // Regression: a reconnect sent join_session and join_room back to back, the
+    // gateway handled them concurrently, the room join lost the race, and the
+    // person was put back in the main room.
+    const { session } = await createSession();
+    const owner = await Participant.join(session.code, "Owner");
+    const { room } = await json<{ room: Room }>(`/api/sessions/${session.code}/rooms`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Group B", participantId: owner.id }),
+    });
+    const first = await Participant.join(session.code, "Bob");
+    first.close();
+
+    // Today's client: the room travels with the join.
+    const back = await Participant.join(session.code, "Bob", { participantId: first.id, roomId: room.id });
+    expect(back.id).toBe(first.id);
+    expect(back.events.find((e) => e.type === "room_state")?.roomId).toBe(room.id);
+    back.close();
+
+    // An older client: the two frames in a hurry. Handled in order, both work.
+    const hurried = await Participant.connect();
+    hurried.send({ type: "join_session", sessionCode: session.code, displayName: "Bob", participantId: first.id });
+    hurried.send({ type: "join_room", roomId: room.id });
+    await hurried.waitFor((e) => e.type === "room_state" && e.roomId === room.id);
+    expect(hurried.events.filter((e) => e.type === "error")).toEqual([]);
+    hurried.close();
+    owner.close();
+  });
 });

@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { addToRoom } from "../ui.js";
+import { addToRoom, openRoomNotes } from "../ui.js";
 
 /**
  * The layout at every width a window is likely to be dragged to: nothing may
@@ -10,6 +10,21 @@ import { addToRoom } from "../ui.js";
  */
 const OUT = process.env.AUDIT_OUT;
 const WIDTHS = [1440, 1280, 1024, 900, 768, 600, 390];
+
+/**
+ * Crossing a breakpoint starts transitions (the sidebar sliding into a drawer),
+ * and mid-slide it is briefly outside the window. Measure once they are done,
+ * rather than after a guessed pause. Only transitions: a looping animation
+ * (a spinner) never ends.
+ */
+async function settled(page: Page) {
+  await page.waitForTimeout(50);
+  await page.waitForFunction(
+    () => document.getAnimations().filter((a) => a instanceof CSSTransition && a.playState === "running").length === 0,
+    undefined,
+    { timeout: 5_000 },
+  );
+}
 
 /** Elements whose box leaves the window horizontally, and any sideways page scroll. */
 async function overflow(page: Page) {
@@ -52,7 +67,7 @@ test("every view fits the window at every width, from desktop to phone", async (
   const check = async (view: string) => {
     for (const width of WIDTHS) {
       await page.setViewportSize({ width, height: width < 700 ? 844 : 900 });
-      await page.waitForTimeout(350);
+      await settled(page);
       const o = await overflow(page);
       if (o.pageScroll > 0 || o.offenders.length > 0) {
         problems.push(
@@ -69,10 +84,10 @@ test("every view fits the window at every width, from desktop to phone", async (
 
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.getByRole("button", { name: /create session/i }).click();
-  await expect(page.getByPlaceholder("ABC123")).toHaveValue(/^[A-Z0-9]{6}$/);
+  await expect(page.getByLabel("Session code")).toHaveValue(/^[A-Z0-9]{5}-[A-Z0-9]{5}$/);
   await page.getByPlaceholder("Ada").fill("Alice");
   await page.getByRole("button", { name: /join session/i }).click();
-  await expect(page.locator(".gdoc")).toBeVisible();
+  await openRoomNotes(page);
 
   // Content, so each view is laid out with something in it.
   await page.locator(".notes-prose").click();
@@ -95,7 +110,7 @@ test("every view fits the window at every width, from desktop to phone", async (
   await expect(page.locator("#room-nav")).toBeHidden();
   await page.getByRole("button", { name: /rooms/i, expanded: false }).click();
   await expect(page.locator("#room-nav")).toBeVisible();
-  await page.waitForTimeout(300);
+  await settled(page);
   if (OUT) await page.screenshot({ path: `${OUT}/drawer-390.png` });
   await page.keyboard.press("Escape");
   await expect(page.locator("#room-nav")).toBeHidden();

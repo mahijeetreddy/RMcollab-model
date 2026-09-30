@@ -7,6 +7,8 @@ export interface Session {
   code: string;
   name: string | null;
   createdAt: number;
+  /** New people wait until the session's owner lets them in. */
+  waitingRoom: boolean;
 }
 
 export interface Room {
@@ -47,6 +49,8 @@ export interface MediaItem {
   uploaderName: string;
   mediaType: MediaType;
   originalFilename: string | null;
+  /** A name given to it; null means use the file name. See mediaTitle(). */
+  title: string | null;
   originalUrl: string;
   mimeType: string | null;
   sizeBytes: number | null;
@@ -98,6 +102,7 @@ export interface LibraryEntry {
   mediaItemId: string;
   mediaType: MediaType;
   originalFilename: string | null;
+  title: string | null;
   uploaderName: string;
   strategy: string;
   /**
@@ -126,4 +131,73 @@ export interface StrategyDescriptor {
   description: string;
   isDefault: boolean;
   available: boolean;
+  /** Why it cannot run right now, in words for a person; null while it can. */
+  unavailableReason?: string | null;
+}
+
+const MEDIA_TITLE_LABEL: Record<MediaType, string> = { text: "Text", image: "Image", audio: "Recording", video: "Video" };
+
+/**
+ * What an upload is called everywhere it appears - feed, notes, library, Ask:
+ * the name someone gave it, else its file name, else "Recording from Alice".
+ */
+export function mediaTitle(item: {
+  title: string | null;
+  originalFilename: string | null;
+  mediaType: MediaType;
+  uploaderName: string;
+}): string {
+  return item.title?.trim() || item.originalFilename || `${MEDIA_TITLE_LABEL[item.mediaType]} from ${item.uploaderName}`;
+}
+
+/** The longest title an upload may be given. */
+export const MAX_TITLE_CHARS = 120;
+
+/**
+ * A title for pasted text from its first words, so it is not "Text from
+ * Alice" three times over: the first line, cut at a word near 60 characters.
+ */
+export function titleFromText(text: string): string | null {
+  const line = text
+    .split(/\r?\n/)
+    .map((l) => l.replace(/^#+\s*|[*_`>]+/g, "").trim())
+    .find((l) => l.length > 0);
+  if (!line) return null;
+  if (line.length <= 60) return line;
+  const cut = line.slice(0, 60);
+  const space = cut.lastIndexOf(" ");
+  return `${(space > 30 ? cut.slice(0, space) : cut).replace(/[,;:.-]+$/, "")}…`;
+}
+
+/**
+ * Session codes: 10 characters from an alphabet without look-alikes (no I, O,
+ * 0 or 1), about 50 bits - guessing one is hopeless, where 6 characters could
+ * be enumerated. Shown split in two for reading aloud; typed with or without
+ * the dash, in any case. Codes from before the change (6 characters) still work.
+ */
+export const SESSION_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+export const SESSION_CODE_LENGTH = 10;
+
+/** What someone typed, as the code is stored: dashes and spaces gone, upper case. */
+export function normalizeSessionCode(input: string): string {
+  return input.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+}
+
+/** "ABCDE23456" -> "ABCDE-23456". Anything else is shown as it is. */
+export function formatSessionCode(code: string): string {
+  const clean = normalizeSessionCode(code);
+  return clean.length === SESSION_CODE_LENGTH ? `${clean.slice(0, 5)}-${clean.slice(5)}` : clean;
+}
+
+/** One of a room's documents. */
+export interface RoomDocument {
+  id: string;
+  roomId: string;
+  title: string;
+  /** The room's own notes, where uploads land. Every room has exactly one; it cannot be deleted. */
+  isMain: boolean;
+  createdBy: string | null;
+  createdByName: string | null;
+  createdAt: number;
+  updatedAt: number;
 }

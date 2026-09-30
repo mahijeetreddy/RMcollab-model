@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { JobStatus, MediaItem, MediaItemWithJob, MediaType } from "@rmcollab/shared";
+import { mediaTitle, type JobStatus, type MediaItem, type MediaItemWithJob, type MediaType } from "@rmcollab/shared";
+import { CardTitle, RetryButton, type Manage } from "./CardActions";
 import { resolveFileUrl } from "../../api/client";
 import { formatBytes, formatTime, MEDIA_TYPE_LABELS } from "../../lib/format";
 import { DocumentPanel } from "./DocumentPanel";
@@ -34,7 +35,7 @@ interface PaneProps {
 
 function MediaPane({ label, url, mediaType, item, active, placeholder, altPrefix }: PaneProps) {
   const text = useTextContent(mediaType === "text" ? url : null, active && mediaType === "text");
-  const name = item.originalFilename ?? `${MEDIA_TYPE_LABELS[mediaType].toLowerCase()} upload`;
+  const name = mediaTitle(item);
 
   return (
     <div className="compare-pane">
@@ -71,9 +72,11 @@ function MediaPane({ label, url, mediaType, item, active, placeholder, altPrefix
 interface CardProps extends MediaItemWithJob {
   /** Set when this card is the target of a library "open". */
   focus?: DocumentFocus | null;
+  /** Who is viewing, for rename, delete and retry; null hides them. */
+  manage?: Manage | null;
 }
 
-export function MediaJobCard({ mediaItem, job, focus = null }: CardProps) {
+export function MediaJobCard({ mediaItem, job, focus = null, manage = null }: CardProps) {
   const status: JobStatus = job?.status ?? "queued";
   const progress = Math.min(1, Math.max(0, job?.progress ?? 0));
   const percent = Math.round(progress * 100);
@@ -87,7 +90,7 @@ export function MediaJobCard({ mediaItem, job, focus = null }: CardProps) {
   const size = formatBytes(mediaItem.sizeBytes);
   const indeterminate = status === "processing" && progress === 0;
   const running = status === "queued" || status === "processing";
-  const label = mediaItem.originalFilename ?? `${MEDIA_TYPE_LABELS[mediaItem.mediaType]} upload`;
+  const label = mediaTitle(mediaItem);
   const baseName = (mediaItem.originalFilename ?? mediaItem.mediaType).replace(/\.[^.]+$/, "") || "document";
 
   // A transcript's timestamps drive the original recording, and the recording's
@@ -155,6 +158,7 @@ export function MediaJobCard({ mediaItem, job, focus = null }: CardProps) {
       aria-label={`${label}, ${STATUS_LABEL[status]}`}
       tabIndex={-1}
     >
+      <CardTitle item={mediaItem} manage={manage} />
       <header className="job-head">
         <span className="job-uploader">{mediaItem.uploaderName}</span>
         <span className="badge">{MEDIA_TYPE_LABELS[mediaItem.mediaType]}</span>
@@ -164,10 +168,10 @@ export function MediaJobCard({ mediaItem, job, focus = null }: CardProps) {
             {job.strategy}
           </span>
         )}
-        {mediaItem.originalFilename && (
-          <span className="job-filename" title={mediaItem.originalFilename}>
-            {mediaItem.originalFilename}
-            {size ? ` · ${size}` : ""}
+        {/* The title says the name; the file's own name only when it was renamed. */}
+        {(size || (mediaItem.originalFilename && mediaItem.originalFilename !== label)) && (
+          <span className="job-filename" title={mediaItem.originalFilename ?? undefined}>
+            {[mediaItem.originalFilename !== label ? mediaItem.originalFilename : null, size].filter(Boolean).join(" · ")}
           </span>
         )}
         <span className="job-head-spacer" />
@@ -208,7 +212,10 @@ export function MediaJobCard({ mediaItem, job, focus = null }: CardProps) {
       </div>
 
       {status === "failed" && (
-        <p className="job-fail">{job?.error ?? "Enhancement failed with no reported reason."}</p>
+        <div className="job-fail">
+          <p>{job?.error ?? "Enhancement failed with no reported reason."}</p>
+          <RetryButton item={mediaItem} manage={manage} />
+        </div>
       )}
 
       {/* A comprehension job replaces the original rather than improving it, so
@@ -217,7 +224,7 @@ export function MediaJobCard({ mediaItem, job, focus = null }: CardProps) {
         <TextCompare
           originalUrl={originalUrl}
           resultUrl={resultUrl}
-          name={mediaItem.originalFilename ?? "text upload"}
+          name={label}
           strategy={job?.strategy ?? null}
         />
       ) : (enhanced || documents.length === 0) && (

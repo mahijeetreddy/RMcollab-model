@@ -1,8 +1,8 @@
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import path from "node:path";
-import type { EnhanceTaskPayload, MediaType } from "@rmcollab/shared";
-import { Router } from "express";
+import { titleFromText, type EnhanceTaskPayload, type MediaType } from "@rmcollab/shared";
+import { Router, type Response } from "express";
 import multer from "multer";
 import { nanoid } from "nanoid";
 import { z } from "zod";
@@ -14,6 +14,8 @@ import {
   insertMediaItem,
   updateJobFromEvent,
   hasRoomAccess,} from "../../db/repositories.js";
+import { touch } from "../../lifecycle.js";
+import { checkUpload, type Refusal } from "../../limits.js";
 import { notesWriter } from "../../notes/index.js";
 import { enqueueEnhanceTask } from "../../queue/enqueue.js";
 import {
@@ -89,6 +91,27 @@ function inferExtension(
   return DEFAULT_EXT[mediaType];
 }
 
+export function sendRefusal(res: Response, refusal: Refusal): void {
+  if (refusal.retryAfterS) res.setHeader("Retry-After", String(refusal.retryAfterS));
+  res.status(refusal.status).json({ error: refusal.error, message: refusal.message, retryAfterS: refusal.retryAfterS });
+}
+
+/**
+ * The strategy options an upload may set. Everything else a strategy reads -
+ * which model, which device, beam size, tile size - is the operator's to
+ * configure, not a participant's: those decide what a job costs (a larger
+ * Whisper model, a tiny tile on a long video), and some make a worker download
+ * whatever it is told to. Unknown keys and out-of-range values are dropped.
+ */
+export function safeParams(input: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  // Clean the audio before transcribing it (comprehension), or not.
+  if (typeof input["denoise"] === "boolean") out["denoise"] = input["denoise"];
+  // The recording's language, when detection gets it wrong: an ISO 639-1/3 code.
+  if (typeof input["language"] === "string" && /^[a-z]{2,3}$/.test(input["language"])) out["language"] = input["language"];
+  return out;
+}
+
 export const mediaRouter = Router();
 
 mediaRouter.post(
@@ -119,6 +142,18 @@ mediaRouter.post(
         error: "room_locked",
         message: "You do not have access to this room.",
       });
+      return;
+    }
+
+    // Before anything is read or stored: the limits are about what this costs.
+    const refusal = await checkUpload({
+      participantId: participant.id,
+      sessionId: room.sessionId,
+      roomId: room.id,
+      bytes: req.file?.size ?? Buffer.byteLength(parsed.data.text ?? "", "utf8"),
+    });
+    if (refusal) {
+      sendRefusal(res, refusal);
       return;
     }
 
@@ -166,7 +201,7 @@ mediaRouter.post(
       try {
         const decoded: unknown = JSON.parse(parsed.data.params);
         if (decoded && typeof decoded === "object" && !Array.isArray(decoded)) {
-          params = decoded as Record<string, unknown>;
+          params = safeParams(decoded as Record<string, unknown>);
         }
       } catch {
         res.status(400).json({ error: "invalid_params", message: "params must be JSON." });
@@ -195,6 +230,8 @@ mediaRouter.post(
       storagePath: inputPath,
       mimeType,
       sizeBytes: buffer.byteLength,
+      // Pasted text has no file name; its first words say more than "Text from Alice".
+      title: !file && text ? titleFromText(text) : null,
     });
     if (!mediaItem) {
       res.status(500).json({ error: "media_insert_failed" });
@@ -239,6 +276,7 @@ mediaRouter.post(
       return;
     }
 
+    touch(room.sessionId);
     await pubsub.publishToRoom(room.id, {
       type: "media_uploaded",
       roomId: room.id,
@@ -250,6 +288,33 @@ mediaRouter.post(
 );
 
 export const filesRouter = Router();
+
+/**
+ * One byte range from a Range header ("bytes=0-", "bytes=500-999", "bytes=-500").
+ * Anything else - several ranges, other units, garbage - is served whole, which
+ * is always a valid answer; a range starting past the end is unsatisfiable.
+ */
+export function byteRange(
+  header: string | undefined,
+  size: number,
+): { start: number; end: number } | "unsatisfiable" | null {
+  const match = /^bytes=(\d*)-(\d*)$/.exec(header?.trim() ?? "");
+  if (!match || (match[1] === "" && match[2] === "")) return null;
+  let start: number;
+  let end: number;
+  if (match[1] === "") {
+    // The last N bytes.
+    const suffix = Number(match[2]);
+    if (suffix === 0) return "unsatisfiable";
+    start = Math.max(0, size - suffix);
+    end = size - 1;
+  } else {
+    start = Number(match[1]);
+    end = match[2] === "" ? size - 1 : Math.min(Number(match[2]), size - 1);
+  }
+  if (start >= size || end < start) return "unsatisfiable";
+  return { start, end };
+}
 
 filesRouter.get(
   "/files/*",
@@ -293,11 +358,37 @@ filesRouter.get(
     }
 
     const ext = path.extname(absolute).slice(1).toLowerCase();
-    res.setHeader("Content-Type", MIME_BY_EXT[ext] ?? "application/octet-stream");
-    res.setHeader("Content-Length", String(info.size));
+    const mime = MIME_BY_EXT[ext] ?? "application/octet-stream";
+    res.setHeader("Content-Type", mime.startsWith("text/") ? `${mime}; charset=utf-8` : mime);
     res.setHeader("Cache-Control", "public, max-age=60");
+    // Uploads are other people's bytes: never sniffed into something runnable,
+    // and inert even if opened directly.
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Content-Security-Policy", "default-src 'none'; sandbox");
+    // Ranges are what let a player seek: without them a browser can only seek
+    // within what it has already downloaded, so a timestamp an hour into a
+    // lecture would not play from there.
+    res.setHeader("Accept-Ranges", "bytes");
 
-    const stream = createReadStream(absolute);
+    const range = byteRange(req.headers.range, info.size);
+    if (range === "unsatisfiable") {
+      res.setHeader("Content-Range", `bytes */${info.size}`);
+      res.status(416).end();
+      return;
+    }
+    if (range) {
+      res.status(206);
+      res.setHeader("Content-Range", `bytes ${range.start}-${range.end}/${info.size}`);
+      res.setHeader("Content-Length", String(range.end - range.start + 1));
+    } else {
+      res.setHeader("Content-Length", String(info.size));
+    }
+    if (req.method === "HEAD") {
+      res.end();
+      return;
+    }
+
+    const stream = createReadStream(absolute, range ? { start: range.start, end: range.end } : undefined);
     stream.on("error", () => res.destroy());
     stream.pipe(res);
   }),

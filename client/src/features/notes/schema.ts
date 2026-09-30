@@ -24,19 +24,30 @@ export const UploadSection = Node.create({
   draggable: true,
 
   addAttributes() {
-    const plain = (name: string) => ({
+    // `attr` is the attribute's name in the document, `html` its data-* name.
+    // They differ for camelCase attributes; looking one up by the other once
+    // dropped mediaItemId and mediaType from every section's HTML.
+    const plain = (attr: string, html: string) => ({
       default: null,
-      parseHTML: (el: HTMLElement) => el.getAttribute(`data-${name}`),
+      parseHTML: (el: HTMLElement) => el.getAttribute(`data-${html}`),
       renderHTML: (attrs: Record<string, unknown>) =>
-        attrs[name] === null || attrs[name] === undefined ? {} : { [`data-${name}`]: String(attrs[name]) },
+        attrs[attr] === null || attrs[attr] === undefined ? {} : { [`data-${html}`]: String(attrs[attr]) },
     });
     return {
-      mediaItemId: plain("media-item-id"),
-      mediaType: plain("media-type"),
-      title: plain("title"),
-      author: plain("author"),
-      createdAt: { default: null },
-      status: plain("status"),
+      mediaItemId: plain("mediaItemId", "media-item-id"),
+      mediaType: plain("mediaType", "media-type"),
+      title: plain("title", "title"),
+      author: plain("author", "author"),
+      createdAt: {
+        default: null,
+        parseHTML: (el: HTMLElement) => {
+          const value = Number(el.getAttribute("data-created-at"));
+          return Number.isFinite(value) && value > 0 ? value : null;
+        },
+        renderHTML: (attrs: Record<string, unknown>) =>
+          typeof attrs.createdAt === "number" ? { "data-created-at": String(attrs.createdAt) } : {},
+      },
+      status: plain("status", "status"),
     };
   },
 

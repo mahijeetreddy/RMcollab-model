@@ -100,7 +100,8 @@ class TranscribeAndSummarise(BaseEnhancer):
         # with several artifacts rather than as a chain of jobs.
         note = ""
         if not summarise:
-            note = "; no language model configured, so no summary"
+            why = llm.unavailable_reason(llm.SUMMARY) or "no language model configured"
+            note = f"; no summary: {why[0].lower()}{why[1:]}"
         else:
             try:
                 text = transcript.path.read_text(encoding="utf-8")
@@ -119,7 +120,11 @@ class TranscribeAndSummarise(BaseEnhancer):
                 )
             except Exception as exc:  # noqa: BLE001 - keep the transcript whatever went wrong
                 log.warning("summary failed for %s: %s", input_path.name, exc)
-                note = f"; summary failed ({type(exc).__name__}: {exc})"
+                note = (
+                    f"; no summary: {str(exc)[0].lower()}{str(exc)[1:]}"
+                    if isinstance(exc, llm.LLMUnavailable)
+                    else f"; summary failed ({type(exc).__name__}: {exc})"
+                )
 
         elapsed = time.monotonic() - started
         kinds = " and ".join(a.label.lower() for a in artifacts)

@@ -2,6 +2,7 @@ import type { Metrics } from "../features/cluster/ClusterPanel";
 import type {
   Artifact,
   ArtifactKind,
+  AskSource,
   ChatMessage,
   EnhancementJob,
   JobStatus,
@@ -11,6 +12,7 @@ import type {
   MediaType,
   Participant,
   Room,
+  RoomDocument,
   ServerEvent,
   Session,
   StrategyDescriptor,
@@ -59,7 +61,8 @@ export const isSession: Guard<Session> = (value): value is Session =>
   isString(value["id"]) &&
   isString(value["code"]) &&
   isNullableString(value["name"]) &&
-  isNumber(value["createdAt"]);
+  isNumber(value["createdAt"]) &&
+  optional(isBoolean)(value["waitingRoom"]);
 
 export const isRoom: Guard<Room> = (value): value is Room =>
   isRecord(value) &&
@@ -97,6 +100,8 @@ const isMediaItem: Guard<MediaItem> = (value): value is MediaItem =>
   isString(value["uploaderName"]) &&
   isMediaType(value["mediaType"]) &&
   isNullableString(value["originalFilename"]) &&
+  // Absent from a gateway older than renaming.
+  optional(nullable(isString))(value["title"]) &&
   isString(value["originalUrl"]) &&
   isNullableString(value["mimeType"]) &&
   isNullableNumber(value["sizeBytes"]) &&
@@ -117,6 +122,18 @@ const isArtifact: Guard<Artifact> = (value): value is Artifact =>
   isNumber(value["createdAt"]);
 
 const isArrayOfArtifacts = arrayOf(isArtifact);
+
+const isAskSource: Guard<AskSource> = (value): value is AskSource =>
+  isRecord(value) &&
+  isNumber(value["n"]) &&
+  literal("transcript", "summary", "document", "notes")(value["kind"]) &&
+  isString(value["title"]) &&
+  isString(value["excerpt"]) &&
+  nullable(isString)(value["mediaItemId"]) &&
+  nullable(isString)(value["artifactId"]) &&
+  nullable(isNumber)(value["atSeconds"]) &&
+  nullable(isString)(value["notesKey"]) &&
+  optional(nullable(isString))(value["docId"]);
 
 const isEnhancementJob: Guard<EnhancementJob> = (value): value is EnhancementJob =>
   isRecord(value) &&
@@ -190,6 +207,34 @@ const eventGuards: { [K in ServerEvent["type"]]: (event: Fields) => boolean } = 
   media_uploaded: (e) =>
     isString(e["roomId"]) && isMediaItem(e["mediaItem"]) && isEnhancementJob(e["job"]),
 
+  media_updated: (e) =>
+    isString(e["roomId"]) && isMediaItem(e["mediaItem"]) && optional(isEnhancementJob)(e["job"]),
+
+  media_deleted: (e) => isString(e["roomId"]) && isString(e["mediaItemId"]),
+
+  room_deleted: (e) => isString(e["roomId"]),
+
+  session_updated: (e) => isSession(e["session"]),
+
+  admission_waiting: (e) => isNullableString(e["sessionName"]) && isNullableString(e["ownerName"]),
+
+  admission_requested: (e) =>
+    isString(e["sessionId"]) &&
+    isRecord(e["participant"]) &&
+    isString((e["participant"] as Record<string, unknown>)["id"]) &&
+    isString((e["participant"] as Record<string, unknown>)["displayName"]),
+
+  admission_decided: (e) =>
+    isString(e["sessionId"]) && isString(e["participantId"]) && isBoolean(e["admitted"]) && isString(e["byName"]),
+
+  admission_withdrawn: (e) => isString(e["sessionId"]) && isString(e["participantId"]),
+
+  participant_removed: (e) =>
+    isString(e["roomId"]) &&
+    isString(e["participantId"]) &&
+    literal("room", "session")(e["scope"]) &&
+    isString(e["byName"]),
+
   job_status_update: (e) =>
     isString(e["roomId"]) &&
     isString(e["jobId"]) &&
@@ -210,7 +255,30 @@ const eventGuards: { [K in ServerEvent["type"]]: (event: Fields) => boolean } = 
   pong: () => true,
 
   error: (e) => isString(e["code"]) && isString(e["message"]),
-  doc: (e) => isString(e["roomId"]) && isString(e["data"]) && isOptionalString(e["from"]),
+  doc: (e) =>
+    isString(e["roomId"]) && isString(e["data"]) && isOptionalString(e["from"]) && isOptionalString(e["docId"]),
+
+  documents_updated: (e) =>
+    isString(e["roomId"]) &&
+    arrayOf(
+      (d: unknown): d is RoomDocument =>
+        isRecord(d) &&
+        isString(d["id"]) &&
+        isString(d["roomId"]) &&
+        isString(d["title"]) &&
+        isBoolean(d["isMain"]) &&
+        isNumber(d["updatedAt"]),
+    )(e["documents"]),
+
+  ask_sources: (e) =>
+    isString(e["requestId"]) && arrayOf(isAskSource)(e["sources"]) && isOptionalString(e["standalone"]),
+  ask_delta: (e) => isString(e["requestId"]) && isString(e["text"]),
+  ask_done: (e) =>
+    isString(e["requestId"]) &&
+    arrayOf(isNumber)(e["cited"]) &&
+    optional(literal("no_model", "quota", "failed", "timeout", "rate_limited"))(e["fallback"]) &&
+    optional(isBoolean)(e["noEvidence"]) &&
+    isOptionalString(e["model"]),
 };
 
 export function isServerEvent(value: unknown): value is ServerEvent {

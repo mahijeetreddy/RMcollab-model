@@ -1,14 +1,17 @@
 import { useState, type FormEvent } from "react";
-import type { Session } from "@rmcollab/shared";
+import { formatSessionCode, normalizeSessionCode, type Session } from "@rmcollab/shared";
 import { api, ApiError } from "../../api/client";
 import { ThemeToggle } from "../../theme/ThemeToggle";
 import type { ThemeApi } from "../../theme/useTheme";
 import type { Credentials } from "../../ws/useRealtime";
+import { forgetSession, loadRecent, visitedAgo, type RecentSession } from "../../lib/recent";
 import { docIcons, icons } from "../notes/icons";
 
 interface Props {
   onEnter: (credentials: Credentials) => void;
   theme: ThemeApi;
+  /** Something to tell someone arriving here, e.g. that they were removed from a session. */
+  notice?: string | null;
 }
 
 function errorMessage(error: unknown): string {
@@ -23,7 +26,7 @@ const FEATURES: ReadonlyArray<{ title: string; body: string }> = [
   { title: "Private breakout rooms", body: "Split a session into focused rooms, locked with a code if you like." },
 ];
 
-export function LandingView({ onEnter, theme }: Props) {
+export function LandingView({ onEnter, theme, notice = null }: Props) {
   const [created, setCreated] = useState<Session | null>(null);
   const [sessionName, setSessionName] = useState("");
   const [creating, setCreating] = useState(false);
@@ -51,9 +54,23 @@ export function LandingView({ onEnter, theme }: Props) {
     }
   };
 
+  const [trying, setTrying] = useState(false);
+  const [tryError, setTryError] = useState<string | null>(null);
+  const tryDemo = async () => {
+    setTrying(true);
+    setTryError(null);
+    try {
+      const session = await api.createDemo();
+      onEnter({ sessionCode: session.code, displayName: displayName.trim() || "Guest" });
+    } catch (error) {
+      setTryError(errorMessage(error));
+      setTrying(false);
+    }
+  };
+
   const handleJoin = async (event: FormEvent) => {
     event.preventDefault();
-    const code = joinCode.trim().toUpperCase();
+    const code = normalizeSessionCode(joinCode);
     const name = displayName.trim();
     if (!code || !name) return;
 
@@ -76,7 +93,7 @@ export function LandingView({ onEnter, theme }: Props) {
   const copyCode = async () => {
     if (!created) return;
     try {
-      await navigator.clipboard.writeText(created.code);
+      await navigator.clipboard.writeText(formatSessionCode(created.code));
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1500);
     } catch {
@@ -107,6 +124,11 @@ export function LandingView({ onEnter, theme }: Props) {
       </header>
 
       <main className="landing-main" id="main-content">
+        {notice && (
+          <p className="landing-notice" role="status">
+            {notice}
+          </p>
+        )}
         <div className="landing-hero">
         <div className="landing-head">
           <p className="eyebrow">
@@ -121,9 +143,22 @@ export function LandingView({ onEnter, theme }: Props) {
             recording, a whiteboard photo or rough notes, and its transcript, summary and action items
             land in a shared document everyone edits live.
           </p>
+          <div className="landing-try">
+            <button type="button" className="primary landing-try-button" onClick={() => void tryDemo()} disabled={trying}>
+              {trying ? "Opening…" : "Try a sample room"}
+            </button>
+            <span className="landing-try-note">A lecture, a whiteboard and notes, already analysed. No upload needed.</span>
+          </div>
+          {tryError && (
+            <p className="error-text" role="alert">
+              {tryError}
+            </p>
+          )}
         </div>
         <HeroPreview />
         </div>
+
+        <RecentSessions onEnter={onEnter} />
 
         <div className="landing-grid">
           <form className="card" onSubmit={handleCreate} aria-labelledby="create-heading">
@@ -164,9 +199,9 @@ export function LandingView({ onEnter, theme }: Props) {
                   <small>Share this join code</small>
                   <strong>
                     <span className="visually-hidden">
-                      Session code {created.code.split("").join(" ")}
+                      Session code {normalizeSessionCode(created.code).split("").join(" ")}
                     </span>
-                    <span aria-hidden="true">{created.code}</span>
+                    <span aria-hidden="true">{formatSessionCode(created.code)}</span>
                   </strong>
                   <button type="button" onClick={copyCode}>
                     {copied ? "Copied ✓" : "Copy code"}
@@ -184,9 +219,9 @@ export function LandingView({ onEnter, theme }: Props) {
               <label htmlFor="join-code">Session code</label>
               <input
                 id="join-code"
-                value={joinCode}
-                onChange={(event) => setJoinCode(event.target.value.toUpperCase())}
-                placeholder="ABC123"
+                value={formatSessionCode(joinCode)}
+                onChange={(event) => setJoinCode(normalizeSessionCode(event.target.value).slice(0, 12))}
+                placeholder="ABCDE-23456"
                 autoComplete="off"
                 spellCheck={false}
                 style={{ fontFamily: "var(--mono)", letterSpacing: "0.16em" }}
@@ -194,7 +229,7 @@ export function LandingView({ onEnter, theme }: Props) {
                 required
               />
               <p className="hint" id="join-code-hint">
-                Six characters, from whoever started the session.
+                Ten characters, from whoever started the session. The dash is optional.
               </p>
             </div>
 
@@ -243,6 +278,11 @@ export function LandingView({ onEnter, theme }: Props) {
             </li>
           ))}
         </ul>
+
+        <p className="landing-fineprint">
+          Sessions, with everything in them, are deleted after 3 days without activity. Uploads are analysed by
+          third-party AI models (Groq and Google Gemini), so don't add anything confidential.
+        </p>
       </main>
     </div>
   );
@@ -299,5 +339,75 @@ function HeroPreview() {
         whiteboard.jpg → notes
       </div>
     </div>
+  );
+}
+
+/** One click back into a session this browser has been in, as the same person. */
+function RecentSessions({ onEnter }: { onEnter: (credentials: Credentials) => void }) {
+  const [recent, setRecent] = useState<RecentSession[]>(loadRecent);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [gone, setGone] = useState<string | null>(null);
+  if (recent.length === 0) return null;
+
+  const rejoin = async (entry: RecentSession) => {
+    setBusy(entry.code);
+    setGone(null);
+    try {
+      // Their participant id comes too: it still opens a session whose code has since changed.
+      const session = await api.getSession(entry.code, entry.participantId ?? undefined);
+      onEnter({
+        sessionCode: session.code,
+        displayName: entry.displayName,
+        ...(entry.participantId ? { participantId: entry.participantId } : {}),
+      });
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) {
+        // Sessions end after a few idle days; this one has.
+        forgetSession(entry.code);
+        setRecent(loadRecent());
+        setGone(entry.name ?? entry.code);
+      }
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <section className="recent" aria-labelledby="recent-heading">
+      <h2 id="recent-heading" className="recent-title">
+        Recent sessions
+      </h2>
+      <ul className="recent-list">
+        {recent.map((entry) => (
+          <li key={entry.code} className="recent-item">
+            <button type="button" className="recent-open" onClick={() => void rejoin(entry)} disabled={busy !== null}>
+              <span className="recent-name">{entry.name || "Untitled session"}</span>
+              <span className="recent-meta">
+                <span className="recent-code">{formatSessionCode(entry.code)}</span> · as {entry.displayName} · {visitedAgo(entry.lastVisited)}
+              </span>
+              <span className="recent-go" aria-hidden="true">
+                {busy === entry.code ? "…" : "Rejoin →"}
+              </span>
+            </button>
+            <button
+              type="button"
+              className="ghost recent-forget"
+              aria-label={`Forget ${entry.name || entry.code}`}
+              onClick={() => {
+                forgetSession(entry.code);
+                setRecent(loadRecent());
+              }}
+            >
+              {icons.close}
+            </button>
+          </li>
+        ))}
+      </ul>
+      {gone && (
+        <p className="recent-gone" role="status">
+          {gone} has ended - sessions are deleted after 3 days without activity.
+        </p>
+      )}
+    </section>
   );
 }

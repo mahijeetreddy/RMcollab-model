@@ -22,6 +22,33 @@ const CONTRACTS = [
   { name: "EnhanceTaskPayload", casing: "snake" },
   // Worker -> gateway capability adverts, which jobs are now routed by.
   { name: "StrategyAdvert", casing: "snake", ts: "gateway/src/queue/routing.ts" },
+  // Ask the room: task kwargs are snake_case (Python reads them); the replies
+  // and embeddings Python writes are single words, valid in either.
+  { name: "EmbedItem", casing: "snake" },
+  { name: "EmbedPassagesTask", casing: "snake" },
+  { name: "EmbeddedVector", casing: "snake" },
+  { name: "EmbeddingResult", casing: "snake" },
+  { name: "AskHistoryTurn", casing: "snake" },
+  { name: "AskPrepareTask", casing: "snake" },
+  { name: "AskPassage", casing: "snake" },
+  { name: "AskAnswerTask", casing: "snake" },
+  { name: "AskReply", casing: "snake" },
+];
+
+// Names both sides must spell the same: a task name or a stream key that
+// drifts fails silently - the message is sent, and nobody is listening.
+const CONSTANTS = [
+  "TASK_ENHANCE",
+  "JOB_EVENT_STREAM",
+  "TASK_EMBED_PASSAGES",
+  "TASK_ASK_PREPARE",
+  "TASK_ASK_ANSWER",
+  "QUEUE_ASK",
+  "QUEUE_EMBED",
+  "EMBEDDING_STREAM",
+  "ASK_CHANNEL_PREFIX",
+  "EMBEDDING_MODEL",
+  "EMBEDDING_DIMENSIONS",
 ];
 
 // A type is only comparable if both sides map onto the same canonical name.
@@ -35,6 +62,11 @@ const TS_TYPES = new Map([
   ["MediaType", "MediaType"],
   ["JobStatus", "JobStatus"],
   ["JobEventArtifact[]", "artifact-list"],
+  ["EmbedItem[]", "embed-item-list"],
+  ["EmbeddedVector[]", "embedded-vector-list"],
+  ["AskPassage[]", "ask-passage-list"],
+  ["AskHistoryTurn[]", "ask-history-list"],
+  ["AskReplyType", "AskReplyType"],
 ]);
 
 const PY_TYPES = new Map([
@@ -46,6 +78,11 @@ const PY_TYPES = new Map([
   ["MediaType", "MediaType"],
   ["JobStatus", "JobStatus"],
   ["list[JobEventArtifact]", "artifact-list"],
+  ["list[EmbedItem]", "embed-item-list"],
+  ["list[EmbeddedVector]", "embedded-vector-list"],
+  ["list[AskPassage]", "ask-passage-list"],
+  ["list[AskHistoryTurn]", "ask-history-list"],
+  ["AskReplyType", "AskReplyType"],
 ]);
 
 const CASING = {
@@ -206,7 +243,23 @@ for (const contract of CONTRACTS) {
   for (const problem of problems) console.error(`  - ${problem}`);
 }
 
+// Constants: `export const X = "..."` / `X = "..."`, or a number.
+const tsSource = read(DEFAULT_TS_FILE);
+const pySource = read(DEFAULT_PY_FILE);
+for (const name of CONSTANTS) {
+  const ts = new RegExp(`export const ${name}\\s*=\\s*("[^"]*"|\\d+)\\s*;`).exec(tsSource)?.[1];
+  const py = new RegExp(`^${name}\\s*=\\s*("[^"]*"|\\d+)\\s*$`, "m").exec(pySource)?.[1];
+  if (ts === undefined || py === undefined) {
+    failures += 1;
+    console.error(`DRIFT  ${name}: missing in ${ts === undefined ? DEFAULT_TS_FILE : DEFAULT_PY_FILE}`);
+  } else if (ts !== py) {
+    failures += 1;
+    console.error(`DRIFT  ${name}: TS ${ts} vs Python ${py}`);
+  }
+}
+if (failures === 0) console.log(`ok  ${CONSTANTS.length} shared constants spelled the same`);
+
 if (failures > 0) {
-  console.error(`\n${failures} contract problem(s). ${TS_FILE} and ${PY_FILE} must be changed together.`);
+  console.error(`\n${failures} contract problem(s). ${DEFAULT_TS_FILE} and ${DEFAULT_PY_FILE} (and any contract's own files) must be changed together.`);
   process.exit(1);
 }
