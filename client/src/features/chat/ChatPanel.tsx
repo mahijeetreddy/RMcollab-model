@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import type { ChatMessage } from "@rmcollab/shared";
-import { formatTime } from "../../lib/format";
+import { formatTime, linkParts } from "../../lib/format";
 import { EmptyState } from "../EmptyState";
 
 interface Props {
@@ -17,6 +17,11 @@ interface Props {
   canModerate?: boolean;
   /** Deletes a message; resolves once the gateway has, rejects with why not. */
   onDelete?: (messageId: string) => Promise<void>;
+  /**
+   * The room whose messages these are, once its snapshot has arrived; null in
+   * between. Each room's history is its own starting point for "unread".
+   */
+  roomKey?: string | null;
 }
 
 function typingLabel(names: string[]): string {
@@ -36,6 +41,7 @@ export function ChatPanel({
   onOpenChange,
   canModerate = false,
   onDelete,
+  roomKey = null,
 }: Props) {
   const [deleting, setDeleting] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -79,7 +85,19 @@ export function ChatPanel({
   // the newest message: keying off `open` would recount the same message every
   // time the panel toggles, and a "first message equals the snapshot" guard
   // silently swallows the very first message a room ever receives.
+  // Per room: switching rooms used to treat the new room's whole history as
+  // new messages - the unread badge jumped by its length, and the last one was
+  // read aloud. Each room's snapshot is now where its "seen" starts, and
+  // nothing is counted while one is on its way.
+  const roomRef = useRef<string | null>(null);
   useEffect(() => {
+    if (!roomKey) return;
+    if (roomRef.current !== roomKey) {
+      roomRef.current = roomKey;
+      seenIdsRef.current = new Set(messages.map((m) => m.id));
+      setUnread(0);
+      return;
+    }
     const seen = seenIdsRef.current;
     if (seen === null) {
       // First delivery for this room is the history snapshot, not new traffic.
@@ -94,7 +112,7 @@ export function ChatPanel({
     const latest = fromOthers[fromOthers.length - 1]!;
     setAnnouncement(`${latest.displayName} says: ${latest.body}`);
     if (!openRef.current) setUnread((n) => n + fromOthers.length);
-  }, [messages, meId]);
+  }, [messages, meId, roomKey]);
 
   // Opening the panel is what marks the conversation read.
   useEffect(() => {
@@ -215,7 +233,17 @@ export function ChatPanel({
                     </button>
                   )}
                 </div>
-                <p className="chat-body">{message.body}</p>
+                <p className="chat-body">
+                  {linkParts(message.body).map((part, i) =>
+                    part.href ? (
+                      <a key={i} href={part.href} target="_blank" rel="noopener noreferrer nofollow">
+                        {part.text}
+                      </a>
+                    ) : (
+                      <span key={i}>{part.text}</span>
+                    ),
+                  )}
+                </p>
                 {deleting === message.id && (
                   <div
                     className="chat-delete-confirm"

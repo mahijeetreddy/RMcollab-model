@@ -12,6 +12,8 @@ interface Props {
   lockError: string | null;
   meId: string | null;
   activeRoom: Room | null;
+  /** The session's owner, who may delete any breakout room, not only their own. */
+  sessionOwner?: boolean;
 }
 
 export function RoomSwitcher({
@@ -23,6 +25,7 @@ export function RoomSwitcher({
   lockError,
   meId,
   activeRoom,
+  sessionOwner = false,
 }: Props) {
   const [name, setName] = useState("");
   const [newRoomCode, setNewRoomCode] = useState("");
@@ -94,7 +97,7 @@ export function RoomSwitcher({
         <RevealCode roomId={activeRoom.id} participantId={meId} />
       )}
 
-      {activeRoom && !activeRoom.isMain && activeRoom.ownerId === meId && meId && (
+      {activeRoom && !activeRoom.isMain && meId && (activeRoom.ownerId === meId || sessionOwner) && (
         <DeleteRoom room={activeRoom} participantId={meId} />
       )}
 

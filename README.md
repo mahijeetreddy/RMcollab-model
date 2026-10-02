@@ -509,6 +509,13 @@ a minute per person; a locked room's material is only askable by people let into
   whether the participant is still in the session: someone removed (or still in the waiting room)
   keeps their participant id in their browser, and before that check it still read the notes,
   searched the library and uploaded. Making a room needs a current member too, not just the code.
+- **The session's owner answers for every room.** Besides the main room's controls, they can
+  delete any breakout room, remove people from it (not its creator, from their own room) and
+  tidy its uploads and documents - a breakout room's creator may have left long ago.
+- **Presence counts connections, not tabs.** One person with two tabs or two devices (the private
+  link invites that) used to vanish from everyone's list when they closed one. Each connection
+  is now counted in Redis with an expiry its heartbeat renews, so a person leaves only with
+  their last connection - and one whose server died stops counting within a minute and a half.
 - **Owners can hand over, and end.** The owner can make someone else the owner (they get the
   waiting room, removals and ending; the previous owner becomes a member), or **end the session**:
   everyone is told and sent back to the start, then every room, note, message and file is

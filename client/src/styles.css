@@ -4392,3 +4392,7 @@ button.end-session-button:hover:not(:disabled) { background: color-mix(in srgb, 
 @media (prefers-reduced-motion: reduce) { .invite-menu { animation: none; } }
 
 .retention-note { margin: 10px 0 2px; font-size: 12px; color: var(--text-faint); }
+
+.waiting-away { padding: 10px 12px; border-radius: 10px; background: var(--warn-soft); color: var(--text) !important; font-size: 13.5px !important; }
+
+.chat-body a { color: var(--accent-text); text-decoration: underline; word-break: break-all; }

@@ -28,6 +28,14 @@ export interface RoomState {
    * then delivers. Taking the view down on every blip destroyed them.
    */
   loadedRoomId: string | null;
+  /**
+   * The active room's events that arrived after asking for it but before its
+   * snapshot: held, then replayed on top of the snapshot. Dropped, as they once
+   * were, someone who joined in that moment never appeared (moving everyone
+   * out of a deleted room did it every time), and a job that finished in it
+   * stayed "processing" until a reload.
+   */
+  heldEvents: ServerEvent[];
   participants: Participant[];
   chat: ChatMessage[];
   media: MediaItemWithJob[];
@@ -36,7 +44,12 @@ export interface RoomState {
   typing: Record<string, { displayName: string; at: number }>;
   lastError: RealtimeError | null;
   /** Waiting room: set while this browser waits to be let in, or once it was turned away. */
-  admission: { status: "waiting"; sessionName: string | null; ownerName: string | null } | { status: "denied"; byName: string } | null;
+  admission:
+    | { status: "waiting"; sessionName: string | null; ownerName: string | null; ownerOnline: boolean }
+    | { status: "denied"; byName: string }
+    | null;
+  /** The room this browser was in was deleted by its owner: for saying so. */
+  roomDeleted: { name: string; byName: string | null; at: number } | null;
   /** Set when the session's owner ended it: everything in it is being deleted. */
   ended: { byName: string; at: number } | null;
   /** The latest handover of the session, for telling people who owns it now. */
@@ -57,12 +70,14 @@ export const initialRoomState: RoomState = {
   activeRoomId: null,
   synced: false,
   loadedRoomId: null,
+  heldEvents: [],
   participants: [],
   chat: [],
   media: [],
   typing: {},
   lastError: null,
   admission: null,
+  roomDeleted: null,
   ended: null,
   ownerChange: null,
   waitingList: [],
@@ -97,6 +112,24 @@ function upsertParticipant(list: Participant[], participant: Participant): Parti
 
 /** Jobs are addressed by `mediaItemId`, not job id: the client indexes media by
  *  item and a retry may carry a new job id for the same item. */
+const TERMINAL = new Set(["done", "failed"]);
+const STAGE: Record<string, number> = { queued: 0, processing: 1, done: 2, failed: 2 };
+
+/**
+ * An update older than what is shown, for the same run of the job: a
+ * finished job does not go back to processing, nor a running one to queued,
+ * nor progress backwards. Held events replayed over a newer snapshot, and
+ * events relayed out of order by different gateway replicas, would otherwise
+ * do exactly that. A retry is a new job id, and always applies.
+ */
+function isStale(job: EnhancementJob, jobId: string, status: string, progress: number): boolean {
+  if (job.id !== jobId) return false;
+  if (TERMINAL.has(job.status)) return true;
+  const was = STAGE[job.status] ?? 0;
+  const now = STAGE[status] ?? 0;
+  return now < was || (now === was && clamp01(progress) < job.progress);
+}
+
 function patchJob(
   media: MediaItemWithJob[],
   mediaItemId: string,
@@ -118,7 +151,31 @@ function clamp01(value: number): number {
   return Math.min(1, Math.max(0, value));
 }
 
+/** Events about the room's contents, which its snapshot would otherwise overwrite. */
+const HELD_UNTIL_SNAPSHOT = new Set<ServerEvent["type"]>([
+  "participant_joined",
+  "participant_left",
+  "chat_message",
+  "chat_message_deleted",
+  "media_uploaded",
+  "media_updated",
+  "media_deleted",
+  "job_status_update",
+  "job_complete",
+  "documents_updated",
+]);
+const MAX_HELD = 500;
+
 function applyServerEvent(state: RoomState, event: ServerEvent): RoomState {
+  if (
+    !state.synced &&
+    HELD_UNTIL_SNAPSHOT.has(event.type) &&
+    "roomId" in event &&
+    event.roomId === state.activeRoomId &&
+    state.heldEvents.length < MAX_HELD
+  ) {
+    return { ...state, heldEvents: [...state.heldEvents, event] };
+  }
   switch (event.type) {
     case "session_joined":
       return {
@@ -134,8 +191,8 @@ function applyServerEvent(state: RoomState, event: ServerEvent): RoomState {
 
     // Authoritative snapshot. It replaces room-scoped state wholesale, which is
     // what makes reconnect a resync rather than a merge of whatever we missed.
-    case "room_state":
-      return {
+    case "room_state": {
+      const snapshot: RoomState = {
         ...state,
         activeRoomId: event.roomId,
         synced: true,
@@ -148,6 +205,11 @@ function applyServerEvent(state: RoomState, event: ServerEvent): RoomState {
         chat: [...event.chatHistory].sort((a, b) => a.createdAt - b.createdAt),
         media: [...event.media].sort((a, b) => b.mediaItem.createdAt - a.mediaItem.createdAt),
       };
+      // Replayed in arrival order, now that the room is synced: each is
+      // idempotent against a snapshot that may already include it.
+      const held = state.heldEvents.filter((e) => "roomId" in e && e.roomId === event.roomId);
+      return held.reduce(applyServerEvent, { ...snapshot, heldEvents: [] });
+    }
 
     case "error":
       return {
@@ -166,7 +228,15 @@ function applyServerEvent(state: RoomState, event: ServerEvent): RoomState {
       return { ...state, session: event.session };
 
     case "admission_waiting":
-      return { ...state, admission: { status: "waiting", sessionName: event.sessionName, ownerName: event.ownerName } };
+      return {
+        ...state,
+        admission: {
+          status: "waiting",
+          sessionName: event.sessionName,
+          ownerName: event.ownerName,
+          ownerOnline: event.ownerOnline ?? true,
+        },
+      };
 
     case "admission_requested":
       if (state.waitingList.some((p) => p.id === event.participant.id)) return state;
@@ -279,14 +349,21 @@ function applyServerEvent(state: RoomState, event: ServerEvent): RoomState {
       // The room list update that follows moves anyone inside to the main room
       // (RoomView); nothing of the gone room is worth keeping in the meantime.
       if (!isCurrentRoom(state, event.roomId)) return state;
-      return { ...state, media: [], chat: [], synced: false, loadedRoomId: null };
+      return {
+        ...state,
+        media: [],
+        chat: [],
+        synced: false,
+        loadedRoomId: null,
+        roomDeleted: { name: event.roomName ?? "This room", byName: event.byName ?? null, at: Date.now() },
+      };
 
     case "job_status_update": {
       if (!isCurrentRoom(state, event.roomId)) return state;
       return {
         ...state,
         media: patchJob(state.media, event.mediaItemId, (job) =>
-          job
+          job && !isStale(job, event.jobId, event.status, event.progress)
             ? {
                 ...job,
                 id: event.jobId,
@@ -360,19 +437,21 @@ export function roomReducer(state: RoomState, action: RoomAction): RoomState {
         lastError: { code: "invalid_server_event", message: action.reason, at: Date.now() },
       };
 
-    case "room_requested":
+    case "room_requested": {
       if (state.activeRoomId === action.roomId && state.synced) return state;
+      const sameRoom = state.activeRoomId === action.roomId;
       return {
         ...state,
         activeRoomId: action.roomId,
         synced: false,
-        // Another room: this one's view goes. The same room (a rejoin) stays up.
+        // Another room: this one's view goes. The same room (a rejoin) stays
+        // up, contents and all, until its fresh snapshot replaces them - not
+        // emptied in between, which flashed an empty feed on every reconnect.
         loadedRoomId: state.loadedRoomId === action.roomId ? state.loadedRoomId : null,
-        participants: [],
-        chat: [],
-        media: [],
-        typing: {},
+        heldEvents: sameRoom ? state.heldEvents : [],
+        ...(sameRoom ? {} : { participants: [], chat: [], media: [], typing: {} }),
       };
+    }
 
     // The socket dropped: the view is stale until the next snapshot replaces it.
     case "connection_lost":

@@ -219,6 +219,15 @@ export function RoomView({ realtime, sessionCode }: Props) {
     [state.activeRoomId, state.me],
   );
 
+  // Moved out of a room its owner deleted: say why, rather than just landing
+  // somewhere else. Not to the owner, who did it.
+  const roomDeleted = state.roomDeleted;
+  useEffect(() => {
+    if (!roomDeleted || !roomDeleted.byName || roomDeleted.byName === state.me?.displayName) return;
+    setRemovedNotice(`${roomDeleted.byName} deleted "${roomDeleted.name}". You're in the main room now.`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [roomDeleted?.at]);
+
   // The session changed hands: say so, and say it to the new owner in particular.
   const ownerChange = state.ownerChange;
   useEffect(() => {
@@ -293,6 +302,7 @@ export function RoomView({ realtime, sessionCode }: Props) {
       )}
       <aside className="sidebar" id="room-nav" aria-label="Session navigation">
         <RoomSwitcher
+          sessionOwner={mainOwner}
           rooms={state.rooms}
           activeRoomId={state.activeRoomId}
           sessionCode={sessionCode}
@@ -324,6 +334,7 @@ export function RoomView({ realtime, sessionCode }: Props) {
           ownerId={activeRoom?.ownerId ?? null}
           room={activeRoom}
           sessionCode={state.session?.code ?? null}
+          sessionOwner={mainOwner}
         />
       </aside>
       {navOpen && (
@@ -412,6 +423,7 @@ export function RoomView({ realtime, sessionCode }: Props) {
             <p className="empty">Waiting for the room snapshot…</p>
           ) : view === "notes" && state.activeRoomId && state.me && openDoc === null ? (
             <NotesHome
+              moderator={mainOwner}
               roomId={state.activeRoomId}
               roomName={activeRoom?.name ?? "This room"}
               meId={state.me.id}
@@ -461,7 +473,12 @@ export function RoomView({ realtime, sessionCode }: Props) {
                 focus={focus}
                 manage={
                   state.activeRoomId && state.me
-                    ? { roomId: state.activeRoomId, meId: state.me.id, ownerId: activeRoom?.ownerId ?? null }
+                    ? {
+                        roomId: state.activeRoomId,
+                        meId: state.me.id,
+                        ownerId: activeRoom?.ownerId ?? null,
+                        moderator: mainOwner,
+                      }
                     : null
                 }
               />
@@ -490,6 +507,7 @@ export function RoomView({ realtime, sessionCode }: Props) {
           onOpenChange={setDockOpen("chat")}
           canModerate={mainOwner || Boolean(state.me && activeRoom?.ownerId === state.me.id)}
           onDelete={deleteMessage}
+          roomKey={state.synced ? state.activeRoomId : null}
         />
       </div>
     </main>

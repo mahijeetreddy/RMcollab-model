@@ -26,6 +26,7 @@ import { jobEventConsumer } from "./jobs/eventConsumer.js";
 import { startLifecycle, stopLifecycle } from "./lifecycle.js";
 import { startDispatcher, stopDispatcher } from "./queue/dispatcher.js";
 import { closeLimits } from "./limits.js";
+import { closePresence } from "./ws/presence.js";
 import { manageRouter } from "./http/routes/manage.js";
 import { versionsRouter } from "./http/routes/versions.js";
 import { documentsRouter } from "./http/routes/documents.js";
@@ -140,6 +141,7 @@ async function main(): Promise<void> {
     stopLifecycle();
     await stopDispatcher();
     await closeLimits();
+    await closePresence();
     // Unsaved note edits (at most one batch window's worth) go to Postgres
     // before the pool closes.
     await docHub.flushAll().catch((err: unknown) => console.error("[docs] final flush failed", err));

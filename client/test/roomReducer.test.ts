@@ -198,9 +198,13 @@ describe("chat_message", () => {
     expect(next).toBe(state);
   });
 
-  it("is ignored while the active room has not synced yet", () => {
+  it("is held while the active room has not synced yet, then shown on top of its snapshot", () => {
     const state = syncedState({ synced: false });
-    expect(apply(state, { type: "chat_message", roomId: ROOM, message: message() })).toBe(state);
+    const held = apply(state, { type: "chat_message", roomId: ROOM, message: message({ id: "late" }) });
+    expect(held.chat).toEqual([]);
+    const synced = apply(held, { type: "room_state", roomId: ROOM, participants: [], chatHistory: [], media: [] });
+    expect(synced.chat.map((m) => m.id)).toEqual(["late"]);
+    expect(synced.heldEvents).toEqual([]);
   });
 
   it("removes the sender's typing indicator but keeps everyone else's", () => {
@@ -292,9 +296,12 @@ describe("connection_lost", () => {
     expect(roomReducer(state, { type: "connection_lost" })).toBe(state);
   });
 
-  it("drops incremental events until the next snapshot arrives", () => {
-    const lost = roomReducer(syncedState(), { type: "connection_lost" });
-    expect(apply(lost, { type: "chat_message", roomId: ROOM, message: message() })).toBe(lost);
+  it("holds incremental events until the next snapshot arrives, and keeps the room's contents meanwhile", () => {
+    const lost = roomReducer(syncedState({ chat: [message({ id: "before" })] }), { type: "connection_lost" });
+    const held = apply(lost, { type: "chat_message", roomId: ROOM, message: message({ id: "during" }) });
+    expect(held.chat.map((m) => m.id)).toEqual(["before"]);
+    // Asking for the same room again does not empty it while the snapshot is on its way.
+    expect(roomReducer(held, { type: "room_requested", roomId: ROOM }).chat.map((m) => m.id)).toEqual(["before"]);
   });
 });
 
@@ -434,11 +441,11 @@ describe("error", () => {
 });
 
 describe("waiting room", () => {
-  const session = { id: "s-1", code: "ABCDE23456", name: "Biology", createdAt: 1, waitingRoom: true };
+  const session = { id: "s-1", code: "ABCDE23456", name: "Biology", createdAt: 1, waitingRoom: true, kept: false, retentionDays: 3 };
 
   it("holds a newcomer on the waiting screen until they are let in", () => {
     let state = apply(initialRoomState, { type: "admission_waiting", sessionName: "Biology", ownerName: "Ada" });
-    expect(state.admission).toEqual({ status: "waiting", sessionName: "Biology", ownerName: "Ada" });
+    expect(state.admission).toEqual({ status: "waiting", sessionName: "Biology", ownerName: "Ada", ownerOnline: true });
     // Being let in is followed by the ordinary session_joined, which clears it.
     state = apply(state, { type: "admission_decided", sessionId: "s-1", participantId: "p-9", admitted: true, byName: "Ada" });
     expect(state.admission?.status).toBe("waiting");
@@ -494,5 +501,52 @@ describe("loadedRoomId", () => {
 
   it("goes when another room is chosen", () => {
     expect(roomReducer(snapshot(ROOM), { type: "room_requested", roomId: OTHER_ROOM }).loadedRoomId).toBeNull();
+  });
+});
+
+describe("events that arrive between asking for a room and its snapshot", () => {
+  const snapshot = (participants: Participant[] = []): ServerEvent => ({
+    type: "room_state",
+    roomId: ROOM,
+    participants,
+    chatHistory: [],
+    media: [],
+  });
+
+  it("keeps someone who joined in that moment (everyone moved out of a deleted room at once)", () => {
+    let state = roomReducer(syncedState({ activeRoomId: OTHER_ROOM }), { type: "room_requested", roomId: ROOM });
+    state = apply(state, { type: "participant_joined", roomId: ROOM, participant: participant({ id: "bob", displayName: "Bob" }) });
+    // The snapshot was taken just before Bob arrived.
+    state = apply(state, snapshot([participant({ id: "me", displayName: "Alice" })]));
+    expect(state.participants.map((p) => p.displayName).sort()).toEqual(["Alice", "Bob"]);
+  });
+
+  it("drops what was held for a room left before its snapshot came", () => {
+    let state = roomReducer(syncedState({ activeRoomId: OTHER_ROOM }), { type: "room_requested", roomId: ROOM });
+    state = apply(state, { type: "participant_joined", roomId: ROOM, participant: participant({ id: "bob" }) });
+    state = roomReducer(state, { type: "room_requested", roomId: OTHER_ROOM });
+    expect(state.heldEvents).toEqual([]);
+  });
+
+  it("never moves a job backwards: a finished job ignores an older progress update", () => {
+    let state = roomReducer(syncedState({ activeRoomId: OTHER_ROOM }), { type: "room_requested", roomId: ROOM });
+    state = apply(state, {
+      type: "job_status_update",
+      roomId: ROOM,
+      jobId: "job-1",
+      mediaItemId: "mi-1",
+      status: "processing",
+      progress: 0.5,
+    });
+    // By the time the snapshot was read, the job had finished.
+    state = apply(state, {
+      type: "room_state",
+      roomId: ROOM,
+      participants: [],
+      chatHistory: [],
+      media: [entry({ id: "mi-1" }, { id: "job-1", status: "done", progress: 1 })],
+    });
+    expect(state.media[0]!.job!.status).toBe("done");
+    expect(state.media[0]!.job!.progress).toBe(1);
   });
 });

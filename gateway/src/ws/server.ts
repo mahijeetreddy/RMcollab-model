@@ -31,6 +31,7 @@ import { docHub } from "../docs/hub.js";
 import { touch } from "../lifecycle.js";
 import { codeGuessesBlocked, recordCodeMiss } from "../limits.js";
 import { pubsub } from "./pubsub.js";
+import { gone, here } from "./presence.js";
 import { socketLimits, type SocketLimits } from "./rateLimit.js";
 import { roomRegistry, sessionRegistry } from "./registry.js";
 
@@ -136,7 +137,7 @@ async function leaveRoom(socket: WebSocket, state: ConnectionState): Promise<voi
     // notes would go stale; the hub saves it and lets it go.
     await docHub.dropAll(roomId).catch((err: unknown) => console.error("[docs] drop failed", err));
   }
-  if (participantId) {
+  if (participantId && (await gone(`room:${roomId}`, participantId, state.connId)) === 0) {
     await pubsub.publishToRoom(roomId, { type: "participant_left", roomId, participantId });
   }
 }
@@ -188,6 +189,7 @@ async function enterRoom(
   }
 
   state.roomId = roomId;
+  await here(`room:${roomId}`, state.participantId, state.connId);
   if (roomRegistry.add(roomId, socket)) {
     await pubsub.subscribeRoom(roomId);
   }
@@ -234,6 +236,7 @@ async function handleJoinSession(
   state.sessionId = session.id;
   state.displayName = participant.displayName;
   state.preferredRoomId = event.roomId ?? null;
+  await here(`session:${session.id}`, participant.id, state.connId);
   // The first person into a session owns its main room (and can remove people from it).
   await claimMainRoom(session.id, participant.id);
 
@@ -247,7 +250,12 @@ async function handleJoinSession(
     state.pending = true;
     await setWaiting(participant.id, true);
     const owner = ownerId ? await getParticipant(ownerId) : null;
-    send(socket, { type: "admission_waiting", sessionName: session.name, ownerName: owner?.displayName ?? null });
+    send(socket, {
+      type: "admission_waiting",
+      sessionName: session.name,
+      ownerName: owner?.displayName ?? null,
+      ownerOnline: Boolean(owner?.connected),
+    });
     await pubsub.publishToSession(session.id, {
       type: "admission_requested",
       sessionId: session.id,
@@ -427,8 +435,11 @@ async function handleClose(socket: WebSocket): Promise<void> {
   states.delete(socket);
   if (!state) return;
 
+  // Disconnected only if this was their last connection: a second tab or
+  // device keeps them here.
   if (state.participantId) {
-    await setParticipantConnected(state.participantId, false).catch(() => undefined);
+    const others = state.sessionId ? await gone(`session:${state.sessionId}`, state.participantId, state.connId) : 0;
+    if (others === 0) await setParticipantConnected(state.participantId, false).catch(() => undefined);
   }
   // Gave up waiting: off the owner's list. Still marked as waiting, so coming
   // back asks again rather than walking in.
@@ -591,6 +602,8 @@ export function createWebSocketServer(httpServer: Server): WebSocketServer {
       // flags stay set forever for sockets a crashed replica never closed.
       // Throttled inside touch() to one write per session every few minutes.
       if (!state.pending && !state.closing) touch(state.sessionId);
+      if (state.participantId && state.sessionId) void here(`session:${state.sessionId}`, state.participantId, state.connId);
+      if (state.participantId && state.roomId) void here(`room:${state.roomId}`, state.participantId, state.connId);
     });
 
     socket.on("message", (data) => {

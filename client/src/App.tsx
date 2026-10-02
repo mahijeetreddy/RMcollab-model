@@ -133,7 +133,12 @@ function SessionApp() {
 
   if (state.admission?.status === "waiting") {
     return (
-      <WaitingScreen sessionName={state.admission.sessionName} ownerName={state.admission.ownerName} onCancel={leave} />
+      <WaitingScreen
+        sessionName={state.admission.sessionName}
+        ownerName={state.admission.ownerName}
+        ownerOnline={state.admission.ownerOnline}
+        onCancel={leave}
+      />
     );
   }
 

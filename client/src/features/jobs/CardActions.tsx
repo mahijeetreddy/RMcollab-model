@@ -7,6 +7,8 @@ export interface Manage {
   roomId: string;
   meId: string;
   ownerId: string | null;
+  /** The room's owner or the session's: may manage anyone's uploads here. */
+  moderator?: boolean;
 }
 
 const message = (cause: unknown, fallback: string) => (cause instanceof ApiError ? cause.message : fallback);
@@ -18,7 +20,9 @@ const message = (cause: unknown, fallback: string) => (cause instanceof ApiError
  */
 export function CardTitle({ item, manage }: { item: MediaItem; manage: Manage | null }) {
   const title = mediaTitle(item);
-  const mine = Boolean(manage && (item.uploaderId === manage.meId || (manage.ownerId && manage.ownerId === manage.meId)));
+  const mine = Boolean(
+    manage && (item.uploaderId === manage.meId || manage.moderator || (manage.ownerId && manage.ownerId === manage.meId)),
+  );
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(title);
   const [menu, setMenu] = useState(false);

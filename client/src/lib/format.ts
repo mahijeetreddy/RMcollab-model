@@ -1,7 +1,36 @@
 import type { MediaType } from "@rmcollab/shared";
 
-export function formatTime(timestamp: number): string {
-  return new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+/**
+ * A message's time, with its day once it is not today: sessions can last a
+ * month, and "10:30" on last Tuesday's message read as this morning.
+ * "10:30", "Yesterday 10:30", "Mon 10:30" within the week, then "12 Sep, 10:30".
+ */
+export function formatTime(timestamp: number, now = Date.now()): string {
+  const at = new Date(timestamp);
+  const time = at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const startOf = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const days = Math.round((startOf(new Date(now)) - startOf(at)) / 86_400_000);
+  if (days <= 0) return time;
+  if (days === 1) return `Yesterday ${time}`;
+  if (days < 7) return `${at.toLocaleDateString([], { weekday: "short" })} ${time}`;
+  return `${at.toLocaleDateString([], { day: "numeric", month: "short" })}, ${time}`;
+}
+
+/** Plain text in pieces, with http(s) links found in it - for chat, where pasted links were dead text. */
+export function linkParts(text: string): { text: string; href?: string }[] {
+  const parts: { text: string; href?: string }[] = [];
+  const url = /\bhttps?:\/\/[^\s<>"']+/gi;
+  let last = 0;
+  for (const match of text.matchAll(url)) {
+    // Trailing punctuation is the sentence's, not the link's.
+    const href = match[0].replace(/[.,;:!?)\]]+$/, "");
+    const start = match.index ?? 0;
+    if (start > last) parts.push({ text: text.slice(last, start) });
+    parts.push({ text: href, href });
+    last = start + href.length;
+  }
+  if (last < text.length) parts.push({ text: text.slice(last) });
+  return parts;
 }
 
 export function formatBytes(bytes: number | null): string | null {

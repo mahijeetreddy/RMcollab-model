@@ -214,11 +214,12 @@ const eventGuards: { [K in ServerEvent["type"]]: (event: Fields) => boolean } = 
 
   media_deleted: (e) => isString(e["roomId"]) && isString(e["mediaItemId"]),
 
-  room_deleted: (e) => isString(e["roomId"]),
+  room_deleted: (e) => isString(e["roomId"]) && optional(isString)(e["roomName"]) && optional(isString)(e["byName"]),
 
   session_updated: (e) => isSession(e["session"]),
 
-  admission_waiting: (e) => isNullableString(e["sessionName"]) && isNullableString(e["ownerName"]),
+  admission_waiting: (e) =>
+    isNullableString(e["sessionName"]) && isNullableString(e["ownerName"]) && optional(isBoolean)(e["ownerOnline"]),
 
   admission_requested: (e) =>
     isString(e["sessionId"]) &&

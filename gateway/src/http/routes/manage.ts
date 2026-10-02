@@ -16,6 +16,7 @@ import {
   mediaStoragePath,
   removeFromSession,
   rotateSessionCode,
+  sessionOwnerId,
   setMediaTitle,
   touchSession,
   updateJobFromEvent,
@@ -35,7 +36,8 @@ import { isKnownStrategy, routeJob } from "./strategies.js";
  * Looking after a room's uploads, and the room itself: rename, retry, delete.
  *
  * Who may do what, with guest identity (a participant id is a bearer token):
- *   - rename or delete an upload: whoever uploaded it, or the room's owner
+ *   - rename or delete an upload: whoever uploaded it, the room's owner, or the session's
+ *     (who answers for every room in it - a breakout room's creator may be long gone)
  *   - retry a failed upload: anyone in the room - it redoes work already asked for
  *   - delete a breakout room: its owner; the main room goes with its session
  */
@@ -65,8 +67,13 @@ async function context(req: Request, res: Response, participantId: string | unde
   return { room, participant, item };
 }
 
-const mayChange = ({ room, participant, item }: Context) =>
-  item.uploaderId === participant.id || (room.ownerId !== null && room.ownerId === participant.id);
+/** The room's owner, or the session's: either may tidy, remove and delete in a room. */
+async function moderates(room: Room, participantId: string): Promise<boolean> {
+  return room.ownerId === participantId || (await sessionOwnerId(room.sessionId)) === participantId;
+}
+
+const mayChange = async ({ room, participant, item }: Context) =>
+  item.uploaderId === participant.id || (await moderates(room, participant.id));
 
 manageRouter.patch(
   "/api/rooms/:roomId/media/:mediaItemId",
@@ -78,7 +85,7 @@ manageRouter.patch(
     }
     const ctx = await context(req, res, parsed.data.participantId);
     if (!ctx) return;
-    if (!mayChange(ctx)) {
+    if (!(await mayChange(ctx))) {
       res.status(403).json({ error: "not_allowed", message: "Only whoever added it, or the room's owner, can rename it." });
       return;
     }
@@ -178,7 +185,7 @@ manageRouter.delete(
     const participantId = typeof req.query["participantId"] === "string" ? req.query["participantId"] : undefined;
     const ctx = await context(req, res, participantId);
     if (!ctx) return;
-    if (!mayChange(ctx)) {
+    if (!(await mayChange(ctx))) {
       res.status(403).json({ error: "not_allowed", message: "Only whoever added it, or the room's owner, can delete it." });
       return;
     }
@@ -206,7 +213,7 @@ manageRouter.post(
       return;
     }
     const owner = await getParticipant(parsed.data.participantId);
-    if (!owner || room.ownerId !== owner.id) {
+    if (!owner || !(await moderates(room, owner.id))) {
       res.status(403).json({ error: "not_room_owner", message: "Only the room's owner can remove people from it." });
       return;
     }
@@ -217,6 +224,12 @@ manageRouter.post(
     }
     if (target.id === owner.id) {
       res.status(400).json({ error: "cannot_remove_self", message: "You can't remove yourself." });
+      return;
+    }
+    // A breakout room's own creator stays in it: the session's owner may delete
+    // the room instead.
+    if (!room.isMain && target.id === room.ownerId) {
+      res.status(400).json({ error: "room_owner", message: "That's this room's owner. You can delete the room instead." });
       return;
     }
 
@@ -264,12 +277,18 @@ manageRouter.delete(
       res.status(400).json({ error: "main_room", message: "The main room goes when its session does." });
       return;
     }
-    if (!participantId || room.ownerId !== participantId) {
+    if (!participantId || !(await moderates(room, participantId))) {
       res.status(403).json({ error: "not_room_owner", message: "Only the person who made this room can delete it." });
       return;
     }
     // Told first, while they can still hear it: everyone inside moves to the main room.
-    await pubsub.publishToRoom(room.id, { type: "room_deleted", roomId: room.id });
+    const owner = await getParticipant(participantId);
+    await pubsub.publishToRoom(room.id, {
+      type: "room_deleted",
+      roomId: room.id,
+      roomName: room.name,
+      ...(owner ? { byName: owner.displayName } : {}),
+    });
     await docHub.dropAll(room.id).catch(() => undefined);
     await deleteRoom(room.id);
     await storage.removeTree(roomFolder(room.id)).catch((err: unknown) =>

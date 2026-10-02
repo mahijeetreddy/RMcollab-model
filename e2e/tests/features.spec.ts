@@ -139,6 +139,42 @@ test("deleting a breakout room moves everyone in it to the main room", async ({ 
     await expect(p.locator("#room-heading")).toHaveText("Main Room");
     await expect(p.getByRole("button", { name: /Group A/ })).toHaveCount(0);
   }
+  // Both moved at once, so each one's arrival raced the other's snapshot of
+  // the main room: Bob used to be missing from Alice's list.
+  await expect(page.locator(".participants")).toContainText("Bob");
+  await expect(bob.locator(".participants")).toContainText("Alice");
+  // And Bob is told why he moved; Alice, who did it, is not.
+  await expect(bob.locator(".removed-notice")).toContainText('Alice deleted "Group A"');
+  await expect(page.locator(".removed-notice")).toHaveCount(0);
+});
+
+test("someone open in two tabs stays in the room when they close one", async ({ page, browser }) => {
+  await newRoom(page, "Alice");
+  const code = (await page.locator(".code-chip").textContent())!.trim();
+  const bobContext = await browser.newContext();
+  const bob = await bobContext.newPage();
+  await bob.goto("/");
+  await bob.getByLabel("Session code").fill(code);
+  await bob.getByPlaceholder("Ada").fill("Bob");
+  await bob.getByRole("button", { name: /join session/i }).click();
+  await expect(bob.locator("#room-heading")).toHaveText("Main Room");
+  const bobId = await bob.evaluate(
+    () => (JSON.parse(window.sessionStorage.getItem("rmcollab.credentials") ?? "{}") as { participantId?: string }).participantId,
+  );
+  // The same Bob on a second device, through his private link.
+  const phone = await (await browser.newContext()).newPage();
+  await phone.goto(`/join/${code}#as=${bobId}`);
+  await phone.getByPlaceholder("Ada").fill("Bob");
+  await phone.getByRole("button", { name: /join session/i }).click();
+  await expect(phone.locator("#room-heading")).toHaveText("Main Room");
+
+  await bobContext.close();
+  // Give the gateway its moment to process the close, then: Bob is still here.
+  await page.waitForTimeout(1500);
+  await expect(page.locator(".participants")).toContainText("Bob");
+  // Gone only when his last connection goes.
+  await phone.context().close();
+  await expect(page.locator(".participants")).not.toContainText("Bob");
 });
 
 async function joinAs(browser: import("@playwright/test").Browser, code: string, name: string) {
@@ -332,4 +368,57 @@ test("session codes are ten characters, typed any way, and guessing is limited",
   }
   clearCodeMisses();
   expect(refused).toBeGreaterThan(0);
+});
+
+test("moving into a room with chat history does not count its history as unread", async ({ page, browser }) => {
+  await newRoom(page, "Alice");
+  const code = (await page.locator(".code-chip").textContent())!.trim();
+  await page.getByLabel(/new breakout room name/i).fill("Group B");
+  await page.getByRole("button", { name: /^add$/i }).click();
+  await expect(page.locator("#room-heading")).toHaveText("Group B");
+  const bob = await joinAs(browser, code, "Bob");
+  await bob.getByRole("button", { name: /Group B/ }).click();
+  await expect(bob.locator("#room-heading")).toHaveText("Group B");
+  // Alice steps out; Bob talks in Group B meanwhile.
+  await page.getByRole("button", { name: /Main Room/ }).click();
+  await expect(page.locator("#room-heading")).toHaveText("Main Room");
+  await bob.locator(".chat-toggle").click();
+  for (const words of ["one", "two", "three"]) {
+    await bob.getByLabel(/message the room/i).fill(words);
+    await bob.getByLabel(/message the room/i).press("Enter");
+  }
+  await expect(bob.getByText("three", { exact: true })).toBeVisible();
+
+  // Back into Group B, chat closed: three old messages are history, not news.
+  await page.getByRole("button", { name: /Group B/ }).click();
+  await expect(page.locator("#room-heading")).toHaveText("Group B");
+  await page.waitForTimeout(500);
+  await expect(page.locator(".chat-unread")).toHaveCount(0);
+  // A new one is.
+  await bob.getByLabel(/message the room/i).fill("four");
+  await bob.getByLabel(/message the room/i).press("Enter");
+  await expect(page.locator(".chat-unread")).toContainText("1");
+});
+
+test("the session's owner can manage a breakout room someone else made", async ({ page, browser }) => {
+  test.setTimeout(120_000);
+  await newRoom(page, "Alice");
+  const code = (await page.locator(".code-chip").textContent())!.trim();
+  const bob = await joinAs(browser, code, "Bob");
+  await bob.getByLabel(/new breakout room name/i).fill("Bob's room");
+  await bob.getByRole("button", { name: /^add$/i }).click();
+  await expect(bob.locator("#room-heading")).toHaveText("Bob's room");
+  const carol = await joinAs(browser, code, "Carol");
+  await carol.getByRole("button", { name: /Bob's room/ }).click();
+  await expect(carol.locator("#room-heading")).toHaveText("Bob's room");
+
+  await page.getByRole("button", { name: /Bob's room/ }).click();
+  await expect(page.locator("#room-heading")).toHaveText("Bob's room");
+  // Carol can be removed from it; Bob, whose room it is, cannot - but the room can go.
+  await expect(page.getByRole("button", { name: "Remove Carol" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Remove Bob" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Delete this room" }).click();
+  await page.getByRole("button", { name: "Delete room" }).click();
+  for (const p of [page, bob, carol]) await expect(p.locator("#room-heading")).toHaveText("Main Room");
+  await expect(carol.locator(".removed-notice")).toContainText(`Alice deleted "Bob's room"`);
 });

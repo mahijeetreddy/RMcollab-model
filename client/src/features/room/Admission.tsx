@@ -8,10 +8,13 @@ const message = (cause: unknown, fallback: string) => (cause instanceof ApiError
 export function WaitingScreen({
   sessionName,
   ownerName,
+  ownerOnline = true,
   onCancel,
 }: {
   sessionName: string | null;
   ownerName: string | null;
+  /** Whether the person who lets people in is connected at all. */
+  ownerOnline?: boolean;
   onCancel: () => void;
 }) {
   return (
@@ -23,6 +26,12 @@ export function WaitingScreen({
           {ownerName ? `${ownerName} will let you into` : "The session's owner will let you into"}{" "}
           {sessionName ? <strong>{sessionName}</strong> : "this session"} shortly. This page updates by itself.
         </p>
+        {!ownerOnline && (
+          <p className="waiting-away">
+            {ownerName ?? "The owner"} isn&apos;t here at the moment, so this may take a while. You&apos;ll be let in
+            once they&apos;re back - or try again later.
+          </p>
+        )}
         <button type="button" className="ghost" onClick={onCancel}>
           Cancel
         </button>

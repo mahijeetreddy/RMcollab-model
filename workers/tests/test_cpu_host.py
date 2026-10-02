@@ -7,7 +7,6 @@ import pytest
 
 from workers.strategies.image import realesrgan
 from workers.strategies.video import realesrgan as video_realesrgan
-from workers.strategies.audio import transcribe
 
 
 @pytest.fixture
@@ -44,6 +43,11 @@ def test_upscaling_runs_with_a_gpu_or_when_cpu_is_allowed(ml_installed, monkeypa
 
 
 def test_whisper_defaults_to_base_without_a_gpu(monkeypatch):
+    # transcribe imports numpy (audio I/O); the CI job installs only the light
+    # requirements, where this test skips itself like the other ML ones.
+    pytest.importorskip("numpy")
+    from workers.strategies.audio import transcribe
+
     def fake(count):
         module = types.ModuleType("ctranslate2")
         module.get_cuda_device_count = lambda: count

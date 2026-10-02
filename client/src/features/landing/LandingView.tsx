@@ -94,7 +94,10 @@ export function LandingView({ onEnter, theme, notice = null }: Props) {
     } catch (error) {
       setJoinError(
         error instanceof ApiError && error.status === 404
-          ? `No session with code ${code}`
+          ? invite && invite.code === code
+            ? // From a link: say what happened to it, not that a code was mistyped.
+              "This invite link no longer works - the session has ended, or its code was changed. Ask for a new link."
+            : `No session with code ${code}`
           : errorMessage(error),
       );
     } finally {

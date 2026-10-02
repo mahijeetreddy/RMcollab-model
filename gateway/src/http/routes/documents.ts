@@ -2,7 +2,7 @@ import { MAX_TITLE_CHARS } from "@rmcollab/shared";
 import { docKey, isDocId, MAIN_DOC_ID } from "@rmcollab/shared/notes";
 import { Router, type Request, type Response } from "express";
 import { z } from "zod";
-import { getParticipant, getRoom, hasRoomAccess, touchSession } from "../../db/repositories.js";
+import { getParticipant, getRoom, hasRoomAccess, sessionOwnerId, touchSession } from "../../db/repositories.js";
 import { createDocument, deleteDocument, getDocument, listDocuments, MAX_DOCUMENTS_PER_ROOM, renameDocument } from "../../db/roomDocs.js";
 import { docHub } from "../../docs/hub.js";
 import { pubsub } from "../../ws/pubsub.js";
@@ -23,6 +23,8 @@ const titleOf = (raw: string | undefined) =>
 interface Member {
   roomId: string;
   ownerId: string | null;
+  /** The session's owner, who may manage every room's documents too. */
+  sessionOwnerId: string | null;
   sessionId: string;
   participantId: string;
 }
@@ -37,7 +39,13 @@ export async function roomMember(req: Request, res: Response): Promise<Member | 
     res.status(403).json({ error: "not_in_room", message: "Join the room first." });
     return null;
   }
-  return { roomId: room.id, ownerId: room.ownerId, sessionId: room.sessionId, participantId: participant.id };
+  return {
+    roomId: room.id,
+    ownerId: room.ownerId,
+    sessionOwnerId: await sessionOwnerId(room.sessionId),
+    sessionId: room.sessionId,
+    participantId: participant.id,
+  };
 }
 
 async function announce(roomId: string): Promise<void> {
@@ -84,7 +92,7 @@ async function owned(req: Request, res: Response) {
     res.status(400).json({ error: "main_document", message: "The room's notes can't be renamed or deleted." });
     return null;
   }
-  if (doc.createdBy !== who.participantId && who.ownerId !== who.participantId) {
+  if (doc.createdBy !== who.participantId && who.ownerId !== who.participantId && who.sessionOwnerId !== who.participantId) {
     res.status(403).json({ error: "not_allowed", message: "Only whoever made it, or the room's owner, can do that." });
     return null;
   }

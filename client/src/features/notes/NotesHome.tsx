@@ -9,6 +9,8 @@ interface Props {
   roomName: string;
   meId: string;
   ownerId: string | null;
+  /** The room's owner or the session's: may rename and delete anyone's documents. */
+  moderator?: boolean;
   /** The room's documents as last announced over the socket; null until one arrives. */
   live: RoomDocument[] | null;
   onOpen: (docId: string) => void;
@@ -21,7 +23,7 @@ const message = (cause: unknown, fallback: string) => (cause instanceof ApiError
  * notes come first - uploads write into it - and anyone can start another.
  * The list follows the room live: a document someone else makes appears here.
  */
-export function NotesHome({ roomId, roomName, meId, ownerId, live, onOpen }: Props) {
+export function NotesHome({ roomId, roomName, meId, ownerId, moderator = false, live, onOpen }: Props) {
   const [fetched, setFetched] = useState<RoomDocument[] | null>(null);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -84,7 +86,7 @@ export function NotesHome({ roomId, roomName, meId, ownerId, live, onOpen }: Pro
               doc={doc}
               roomId={roomId}
               meId={meId}
-              mayManage={!doc.isMain && (doc.createdBy === meId || (ownerId !== null && ownerId === meId))}
+              mayManage={!doc.isMain && (doc.createdBy === meId || moderator || (ownerId !== null && ownerId === meId))}
               onOpen={() => onOpen(doc.id)}
             />
           ))}

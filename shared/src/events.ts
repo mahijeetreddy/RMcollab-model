@@ -66,11 +66,11 @@ export type ServerEvent =
   | { type: "media_updated"; roomId: string; mediaItem: MediaItem; job?: EnhancementJob }
   | { type: "media_deleted"; roomId: string; mediaItemId: string }
   // The room is gone; anyone in it is moved to the session's main room.
-  | { type: "room_deleted"; roomId: string }
+  | { type: "room_deleted"; roomId: string; roomName?: string; byName?: string }
   // The session's code or settings changed (a new code after a removal, the waiting room switched).
   | { type: "session_updated"; session: Session }
   // Waiting room: this socket waits to be let in; nothing of the session is shown meanwhile.
-  | { type: "admission_waiting"; sessionName: string | null; ownerName: string | null }
+  | { type: "admission_waiting"; sessionName: string | null; ownerName: string | null; ownerOnline?: boolean }
   // To the session: someone is waiting. Only the owner acts on it.
   | { type: "admission_requested"; sessionId: string; participant: { id: string; displayName: string } }
   // Decided: let in, or turned away.

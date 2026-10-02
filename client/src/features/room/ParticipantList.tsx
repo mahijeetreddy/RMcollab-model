@@ -12,10 +12,12 @@ interface Props {
   room?: Room | null;
   /** For handing the session over; only the main room's owner is offered it. */
   sessionCode?: string | null;
+  /** This person owns the session, and so may remove people from any room in it. */
+  sessionOwner?: boolean;
 }
 
-export function ParticipantList({ participants, meId, ownerId, room = null, sessionCode = null }: Props) {
-  const iOwnIt = Boolean(meId && ownerId && meId === ownerId && room);
+export function ParticipantList({ participants, meId, ownerId, room = null, sessionCode = null, sessionOwner = false }: Props) {
+  const iOwnIt = Boolean(room && meId && ((ownerId && meId === ownerId) || sessionOwner));
   const [confirming, setConfirming] = useState<string | null>(null);
   const [handingTo, setHandingTo] = useState<string | null>(null);
   const handOver = async (target: Participant) => {
@@ -174,7 +176,7 @@ export function ParticipantList({ participants, meId, ownerId, room = null, sess
                 </span>
               )}
               {participant.id === meId && <span className="you-tag">you</span>}
-              {iOwnIt && participant.id !== meId && (
+              {iOwnIt && participant.id !== meId && (room?.isMain || participant.id !== ownerId) && (
                 <button
                   type="button"
                   className="ghost participant-remove"
