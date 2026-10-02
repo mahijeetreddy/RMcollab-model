@@ -18,11 +18,19 @@ import {
   isMetrics,
 } from "../lib/guards";
 
+/**
+ * Where the gateway is. In development it is a separate origin (the Vite dev
+ * server is on :5173, the gateway on :4000). A production build is served from
+ * the same origin as the gateway (see infra/web), and is built with both set to
+ * "" - meaning "this page's own origin", over wss:// when the page is https.
+ */
 export const GATEWAY_HTTP: string =
   import.meta.env.VITE_GATEWAY_HTTP ?? "http://localhost:4000";
 
 export const GATEWAY_WS: string =
-  import.meta.env.VITE_GATEWAY_WS ?? "ws://localhost:4000/ws";
+  import.meta.env.VITE_GATEWAY_WS === ""
+    ? `${window.location.protocol === "https:" ? "wss" : "ws"}://${window.location.host}/ws`
+    : (import.meta.env.VITE_GATEWAY_WS ?? "ws://localhost:4000/ws");
 
 export class ApiError extends Error {
   readonly status: number;
@@ -233,6 +241,11 @@ export const api = {
     return requestIn(`/api/sessions/${encodeURIComponent(code)}${who}`, "session", isSession);
   },
 
+  /** Keep the session through longer quiet spells (30 days instead of 3). Owner only. */
+  setSessionKept(code: string, participantId: string, kept: boolean): Promise<unknown> {
+    return fetchJson(`/api/sessions/${encodeURIComponent(code)}`, { ...json({ participantId, kept }), method: "PATCH" });
+  },
+
   setWaitingRoom(code: string, participantId: string, waitingRoom: boolean): Promise<unknown> {
     return fetchJson(`/api/sessions/${encodeURIComponent(code)}`, { ...json({ participantId, waitingRoom }), method: "PATCH" });
   },
@@ -324,14 +337,49 @@ export const api = {
     file: File,
     strategy: string,
   ): Promise<MediaItemWithJob> {
+    // Fields before the file, and the uploader in the URL too: the gateway
+    // checks who is uploading and the limits before it reads the file, so a
+    // refused upload is never stored.
     const form = new FormData();
-    form.append("file", file);
     form.append("participantId", participantId);
     form.append("strategy", strategy);
-    return request(`/api/rooms/${encodeURIComponent(roomId)}/media`, isMediaItemWithJob, {
+    form.append("file", file);
+    const query = `?participantId=${encodeURIComponent(participantId)}`;
+    return request(`/api/rooms/${encodeURIComponent(roomId)}/media${query}`, isMediaItemWithJob, {
       method: "POST",
       body: form,
     });
+  },
+
+  /** Ends the session for everyone and deletes everything in it. Owner only. */
+  endSession(code: string, participantId: string): Promise<void> {
+    return send(`/api/sessions/${encodeURIComponent(code)}?participantId=${encodeURIComponent(participantId)}`, {
+      method: "DELETE",
+    });
+  },
+
+  /** Hands the session to someone else in it. Owner only. */
+  handOverSession(code: string, participantId: string, targetId: string): Promise<void> {
+    return send(`/api/sessions/${encodeURIComponent(code)}/owner`, json({ participantId, targetId }));
+  },
+
+  deleteMessage(roomId: string, messageId: string, participantId: string): Promise<void> {
+    return send(
+      `/api/rooms/${encodeURIComponent(roomId)}/messages/${encodeURIComponent(messageId)}?participantId=${encodeURIComponent(participantId)}`,
+      { method: "DELETE" },
+    );
+  },
+
+  /** How many jobs are ahead of each of this room's queued jobs, in their worker pool. */
+  async queuePositions(roomId: string, participantId: string): Promise<Record<string, number>> {
+    const { body } = await fetchJson(
+      `/api/rooms/${encodeURIComponent(roomId)}/queue?participantId=${encodeURIComponent(participantId)}`,
+    );
+    const positions = (body as { positions?: unknown }).positions;
+    if (!positions || typeof positions !== "object") return {};
+    return Object.fromEntries(
+      Object.entries(positions as Record<string, unknown>).filter((e): e is [string, number] => typeof e[1] === "number"),
+    );
   },
 
   async fetchTextBlob(url: string): Promise<string> {

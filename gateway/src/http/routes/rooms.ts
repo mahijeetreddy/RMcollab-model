@@ -2,7 +2,13 @@ import { Router } from "express";
 import { z } from "zod";
 import {
   createRoom,
+  deleteChatMessage,
+  getChatMessageAuthor,
+  getParticipant,
+  getRoom,
   getRoomCodeForOwner,
+  hasRoomAccess,
+  sessionOwnerId,
   getSessionByCode,
   isAdmittedMember,
   listRooms,
@@ -69,6 +75,37 @@ roomsRouter.get(
       return;
     }
     res.json({ rooms: await listRooms(session.id) });
+  }),
+);
+
+// Deleting a chat message: its author can, and so can the room's owner and
+// the session's owner - moderation for whoever is responsible for the room.
+roomsRouter.delete(
+  "/api/rooms/:roomId/messages/:messageId",
+  asyncHandler(async (req, res) => {
+    const room = await getRoom(routeParam(req, "roomId"));
+    const participantId = typeof req.query["participantId"] === "string" ? req.query["participantId"] : "";
+    const participant = participantId ? await getParticipant(participantId) : null;
+    if (!room || !participant || participant.sessionId !== room.sessionId || !(await hasRoomAccess(room.id, participant.id))) {
+      res.status(403).json({ error: "not_in_room", message: "Join the room first." });
+      return;
+    }
+    const message = await getChatMessageAuthor(routeParam(req, "messageId"));
+    if (!message || message.roomId !== room.id) {
+      res.status(404).json({ error: "not_found", message: "That message is already gone." });
+      return;
+    }
+    const mayDelete =
+      message.participantId === participant.id ||
+      room.ownerId === participant.id ||
+      (await sessionOwnerId(room.sessionId)) === participant.id;
+    if (!mayDelete) {
+      res.status(403).json({ error: "not_allowed", message: "Only whoever wrote it, or an owner, can delete a message." });
+      return;
+    }
+    await deleteChatMessage(routeParam(req, "messageId"));
+    await pubsub.publishToRoom(room.id, { type: "chat_message_deleted", roomId: room.id, messageId: routeParam(req, "messageId") });
+    res.status(204).end();
   }),
 );
 

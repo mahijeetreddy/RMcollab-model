@@ -5,6 +5,10 @@ WORKDIR /app
 COPY workers/requirements.txt workers/requirements-ask.txt workers/requirements-errors.txt workers/
 RUN pip install --no-cache-dir -r workers/requirements.txt -r workers/requirements-ask.txt -r workers/requirements-errors.txt
 
+# The installer tooling from the base image (pip, setuptools) carries known
+# advisories; nothing at runtime uses it, but it is upgraded anyway, last.
+RUN pip install --no-cache-dir --upgrade "pip>=26.2" "setuptools>=83"
+
 COPY workers workers
 
 ENV PYTHONPATH=/app \

@@ -475,3 +475,24 @@ describe("waiting room", () => {
     expect(state.session?.code).toBe("ZZZZZ22222");
   });
 });
+
+describe("loadedRoomId", () => {
+  const snapshot = (roomId: string) =>
+    apply(initialRoomState, { type: "room_state", roomId, participants: [], chatHistory: [], media: [] });
+
+  it("is set by a room's snapshot", () => {
+    expect(snapshot(ROOM).loadedRoomId).toBe(ROOM);
+  });
+
+  it("survives a dropped connection and the rejoin of the same room", () => {
+    let state = roomReducer(snapshot(ROOM), { type: "connection_lost" });
+    expect(state.synced).toBe(false);
+    expect(state.loadedRoomId).toBe(ROOM);
+    state = roomReducer(state, { type: "room_requested", roomId: ROOM });
+    expect(state.loadedRoomId).toBe(ROOM);
+  });
+
+  it("goes when another room is chosen", () => {
+    expect(roomReducer(snapshot(ROOM), { type: "room_requested", roomId: OTHER_ROOM }).loadedRoomId).toBeNull();
+  });
+});

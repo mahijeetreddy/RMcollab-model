@@ -1,8 +1,8 @@
 import { createReadStream } from "node:fs";
-import { stat } from "node:fs/promises";
+import { mkdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { titleFromText, type EnhanceTaskPayload, type MediaType } from "@rmcollab/shared";
-import { Router, type Response } from "express";
+import { Router, type Request, type Response } from "express";
 import multer from "multer";
 import { nanoid } from "nanoid";
 import { z } from "zod";
@@ -15,13 +15,16 @@ import {
   updateJobFromEvent,
   hasRoomAccess,} from "../../db/repositories.js";
 import { touch } from "../../lifecycle.js";
-import { checkUpload, type Refusal } from "../../limits.js";
+import { checkUpload, withStorageReserved, type Refusal } from "../../limits.js";
 import { notesWriter } from "../../notes/index.js";
-import { enqueueEnhanceTask } from "../../queue/enqueue.js";
+import { submitJob } from "../../queue/dispatcher.js";
 import {
   enhancedPath,
+  mediaFolder,
   originalPath,
+  readHead,
   storage,
+  uploadTempDir,
   verifyFileSignature,
 } from "../../storage/local.js";
 import { pubsub } from "../../ws/pubsub.js";
@@ -30,9 +33,104 @@ import { routeParam } from "../params.js";
 import { resolveMediaType, sniffMedia } from "../sniff.js";
 import { DEFAULT_STRATEGY, isKnownStrategy, routeJob } from "./strategies.js";
 
+// Streamed to a temp file as it arrives, never held in memory: a 64 MB upload
+// costs a replica 64 MB of disk for a moment, not of RAM.
 const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: config.maxUploadBytes },
+  storage: multer.diskStorage({
+    destination: (_req, _file, done) => {
+      mkdir(uploadTempDir, { recursive: true }).then(
+        () => done(null, uploadTempDir),
+        (err: Error) => done(err, uploadTempDir),
+      );
+    },
+    filename: (_req, _file, done) => done(null, nanoid(16)),
+  }),
+  limits: { fileSize: config.maxUploadBytes, files: 1 },
+});
+
+/** Enough of a file's start to tell what it is (see sniff.ts). */
+const SNIFF_BYTES = 64 * 1024;
+
+/**
+ * Answers without keeping the body. A browser still sending a file does not
+ * cope with being answered mid-upload - fetch reports a network error, not the
+ * reason - so what remains is read and thrown away first. That costs bandwidth,
+ * not memory or disk.
+ */
+function answerAfterDiscarding(req: Request, answer: () => void): void {
+  if (req.complete) {
+    answer();
+    return;
+  }
+  req.once("end", answer);
+  req.once("error", () => undefined);
+  req.resume();
+}
+
+interface Uploader {
+  room: NonNullable<Awaited<ReturnType<typeof getRoom>>>;
+  participant: NonNullable<Awaited<ReturnType<typeof getParticipant>>>;
+}
+
+/** The room and the person, when they may upload into it; otherwise why not. */
+async function uploaderOf(
+  roomId: string,
+  participantId: string,
+): Promise<{ ok: Uploader } | { status: number; body: Record<string, string> }> {
+  const room = await getRoom(roomId);
+  if (!room) return { status: 404, body: { error: "room_not_found" } };
+  const participant = await getParticipant(participantId);
+  if (!participant || participant.sessionId !== room.sessionId) {
+    return { status: 403, body: { error: "participant_not_in_session" } };
+  }
+  // Being in the session is not enough to upload into a locked breakout; and
+  // someone removed from the session, or still waiting, is not in it.
+  if (!(await hasRoomAccess(room.id, participant.id))) {
+    return { status: 403, body: { error: "room_locked", message: "You do not have access to this room." } };
+  }
+  return { ok: { room, participant } };
+}
+
+/**
+ * Before the body is read: who is uploading, whether they may, and whether the
+ * limits allow it - so a refused upload is never stored, even for a moment.
+ * Needs the participant in the URL (the app sends it there); a caller that only
+ * names itself in the body is checked after, as before.
+ */
+const precheck = asyncHandler(async (req, res, next) => {
+  const declared = Number(req.headers["content-length"]);
+  // The limit is the file's; multipart framing adds a little.
+  if (Number.isFinite(declared) && declared > config.maxUploadBytes + 1024 * 1024) {
+    answerAfterDiscarding(req, () =>
+      res.status(413).json({
+        error: "file_too_large",
+        message: `Files can be up to ${Math.round(config.maxUploadBytes / (1024 * 1024))} MB.`,
+      }),
+    );
+    return;
+  }
+  const participantId = typeof req.query["participantId"] === "string" ? req.query["participantId"] : null;
+  if (!participantId) {
+    next();
+    return;
+  }
+  const who = await uploaderOf(routeParam(req, "roomId"), participantId);
+  if (!("ok" in who)) {
+    answerAfterDiscarding(req, () => res.status(who.status).json(who.body));
+    return;
+  }
+  const refusal = await checkUpload({
+    participantId: who.ok.participant.id,
+    sessionId: who.ok.room.sessionId,
+    roomId: who.ok.room.id,
+    bytes: Number.isFinite(declared) ? declared : 0,
+  });
+  if (refusal) {
+    answerAfterDiscarding(req, () => sendRefusal(res, refusal));
+    return;
+  }
+  res.locals["uploader"] = who.ok;
+  next();
 });
 
 const bodySchema = z.object({
@@ -116,176 +214,192 @@ export const mediaRouter = Router();
 
 mediaRouter.post(
   "/api/rooms/:roomId/media",
+  precheck,
   upload.single("file"),
   asyncHandler(async (req, res) => {
-    const room = await getRoom(routeParam(req, "roomId"));
-    if (!room) {
-      res.status(404).json({ error: "room_not_found" });
-      return;
+    // The temp file goes whatever happens; once moved into place it is not there.
+    const temp = req.file?.path;
+    try {
+      await receiveUpload(req, res);
+    } finally {
+      if (temp) await rm(temp, { force: true }).catch(() => undefined);
     }
+  }),
+);
 
-    const parsed = bodySchema.safeParse(req.body ?? {});
-    if (!parsed.success) {
-      res.status(400).json({ error: "invalid_body", message: "participantId is required." });
-      return;
-    }
-    const { participantId, strategy: requestedStrategy, text } = parsed.data;
+async function receiveUpload(req: Request, res: Response): Promise<void> {
+  const prechecked = res.locals["uploader"] as Uploader | undefined;
+  const parsed = bodySchema.safeParse({
+    ...(req.body ?? {}),
+    ...(prechecked ? { participantId: prechecked.participant.id } : {}),
+  });
+  if (!parsed.success) {
+    res.status(400).json({ error: "invalid_body", message: "participantId is required." });
+    return;
+  }
+  const { strategy: requestedStrategy, text } = parsed.data;
 
-    const participant = await getParticipant(participantId);
-    if (!participant || participant.sessionId !== room.sessionId) {
-      res.status(403).json({ error: "participant_not_in_session" });
+  let uploader = prechecked;
+  if (!uploader) {
+    const who = await uploaderOf(routeParam(req, "roomId"), parsed.data.participantId);
+    if (!("ok" in who)) {
+      res.status(who.status).json(who.body);
       return;
     }
-    // Being in the session is not enough to upload into a locked breakout.
-    if (!(await hasRoomAccess(room.id, participant.id))) {
-      res.status(403).json({
-        error: "room_locked",
-        message: "You do not have access to this room.",
-      });
-      return;
-    }
-
-    // Before anything is read or stored: the limits are about what this costs.
+    uploader = who.ok;
     const refusal = await checkUpload({
-      participantId: participant.id,
-      sessionId: room.sessionId,
-      roomId: room.id,
-      bytes: req.file?.size ?? Buffer.byteLength(parsed.data.text ?? "", "utf8"),
+      participantId: uploader.participant.id,
+      sessionId: uploader.room.sessionId,
+      roomId: uploader.room.id,
+      bytes: req.file?.size ?? Buffer.byteLength(text ?? "", "utf8"),
     });
     if (refusal) {
       sendRefusal(res, refusal);
       return;
     }
+  }
+  const { room, participant } = uploader;
 
-    const file = req.file;
-    let mediaType: MediaType | null =
-      parsed.data.mediaType ?? inferMediaType(file?.mimetype) ?? (text != null ? "text" : null);
+  const file = req.file;
+  let mediaType: MediaType | null =
+    parsed.data.mediaType ?? inferMediaType(file?.mimetype) ?? (text != null ? "text" : null);
 
-    let buffer: Buffer;
-    let originalFilename: string | null;
-    let mimeType: string | null;
-    // Set when the bytes contradict the claimed type: the extension then comes
-    // from the content, not from a filename that was wrong.
-    let sniffedExt: string | null = null;
+  // Pasted text arrives in memory (it is small); a file is on disk already.
+  let buffer: Buffer | null = null;
+  let originalFilename: string | null;
+  let mimeType: string | null;
+  // Set when the bytes contradict the claimed type: the extension then comes
+  // from the content, not from a filename that was wrong.
+  let sniffedExt: string | null = null;
 
-    if (file) {
-      // The file's own bytes decide which pool gets it, not the browser's label.
-      const sniffed = sniffMedia(file.buffer);
-      if (!sniffed) {
-        res.status(415).json({
-          error: "unsupported_media",
-          message: "That file is not text, an image, a recording or a video that can be read.",
-        });
-        return;
-      }
-      const resolved = resolveMediaType(sniffed, mediaType);
-      mediaType = resolved.mediaType;
-      buffer = file.buffer;
-      originalFilename = file.originalname || null;
-      mimeType = resolved.overridden ? sniffed.mime : file.mimetype || sniffed.mime;
-      if (resolved.overridden) sniffedExt = sniffed.ext;
-    } else if (!mediaType) {
-      res.status(400).json({ error: "unsupported_media", message: "Could not determine mediaType." });
-      return;
-    } else if (mediaType === "text" && text && text.trim().length > 0) {
-      buffer = Buffer.from(text, "utf8");
-      originalFilename = null;
-      mimeType = "text/plain";
-    } else {
-      res.status(400).json({ error: "missing_payload", message: "Provide a file or text body." });
+  if (file) {
+    // The file's own bytes decide which pool gets it, not the browser's label.
+    const sniffed = sniffMedia(await readHead(file.path, SNIFF_BYTES));
+    if (!sniffed) {
+      res.status(415).json({
+        error: "unsupported_media",
+        message: "That file is not text, an image, a recording or a video that can be read.",
+      });
       return;
     }
+    const resolved = resolveMediaType(sniffed, mediaType);
+    mediaType = resolved.mediaType;
+    originalFilename = file.originalname || null;
+    mimeType = resolved.overridden ? sniffed.mime : file.mimetype || sniffed.mime;
+    if (resolved.overridden) sniffedExt = sniffed.ext;
+  } else if (!mediaType) {
+    res.status(400).json({ error: "unsupported_media", message: "Could not determine mediaType." });
+    return;
+  } else if (mediaType === "text" && text && text.trim().length > 0) {
+    buffer = Buffer.from(text, "utf8");
+    originalFilename = null;
+    mimeType = "text/plain";
+  } else {
+    res.status(400).json({ error: "missing_payload", message: "Provide a file or text body." });
+    return;
+  }
 
-    let params: Record<string, unknown> = {};
-    if (parsed.data.params) {
-      try {
-        const decoded: unknown = JSON.parse(parsed.data.params);
-        if (decoded && typeof decoded === "object" && !Array.isArray(decoded)) {
-          params = safeParams(decoded as Record<string, unknown>);
-        }
-      } catch {
-        res.status(400).json({ error: "invalid_params", message: "params must be JSON." });
-        return;
+  let params: Record<string, unknown> = {};
+  if (parsed.data.params) {
+    try {
+      const decoded: unknown = JSON.parse(parsed.data.params);
+      if (decoded && typeof decoded === "object" && !Array.isArray(decoded)) {
+        params = safeParams(decoded as Record<string, unknown>);
       }
+    } catch {
+      res.status(400).json({ error: "invalid_params", message: "params must be JSON." });
+      return;
     }
+  }
 
-    const strategy =
-      requestedStrategy && isKnownStrategy(mediaType, requestedStrategy)
-        ? requestedStrategy
-        : DEFAULT_STRATEGY;
+  const strategy =
+    requestedStrategy && isKnownStrategy(mediaType, requestedStrategy)
+      ? requestedStrategy
+      : DEFAULT_STRATEGY;
 
-    const mediaItemId = nanoid(16);
-    const ext = sniffedExt ?? inferExtension(mediaType, originalFilename ?? undefined, mimeType ?? undefined);
-    const inputPath = originalPath(room.id, mediaItemId, ext);
-    const outputPath = enhancedPath(room.id, mediaItemId, ext);
+  const mediaItemId = nanoid(16);
+  const ext = sniffedExt ?? inferExtension(mediaType, originalFilename ?? undefined, mimeType ?? undefined);
+  const inputPath = originalPath(room.id, mediaItemId, ext);
+  const outputPath = enhancedPath(room.id, mediaItemId, ext);
 
-    await storage.save(inputPath, buffer);
+  if (file) await storage.moveIn(file.path, inputPath);
+  else await storage.save(inputPath, buffer!);
+  const sizeBytes = file ? file.size : buffer!.byteLength;
 
-    const mediaItem = await insertMediaItem({
+  // Measured against the room's and session's storage and recorded as one
+  // step, so uploads arriving together cannot each fit and all go in.
+  const reserved = await withStorageReserved({ sessionId: room.sessionId, roomId: room.id, bytes: sizeBytes }, () =>
+    insertMediaItem({
       id: mediaItemId,
       roomId: room.id,
       uploaderId: participant.id,
-      mediaType,
+      mediaType: mediaType!,
       originalFilename,
       storagePath: inputPath,
       mimeType,
-      sizeBytes: buffer.byteLength,
+      sizeBytes,
       // Pasted text has no file name; its first words say more than "Text from Alice".
       title: !file && text ? titleFromText(text) : null,
-    });
-    if (!mediaItem) {
-      res.status(500).json({ error: "media_insert_failed" });
-      return;
-    }
+    }),
+  );
+  if ("refusal" in reserved) {
+    await storage.removeTree(mediaFolder(room.id, mediaItemId)).catch(() => undefined);
+    sendRefusal(res, reserved.refusal);
+    return;
+  }
+  const mediaItem = reserved.value;
+  if (!mediaItem) {
+    res.status(500).json({ error: "media_insert_failed" });
+    return;
+  }
 
-    const job = await insertJob({ mediaItemId, mediaType, strategy });
-    // The upload's section in the room notes, saved before the job is queued,
-    // so whichever replica handles its completion is guaranteed to find it.
-    await notesWriter.uploaded(mediaItem);
+  const job = await insertJob({ mediaItemId, mediaType, strategy });
+  // The upload's section in the room notes, saved before the job is queued,
+  // so whichever replica handles its completion is guaranteed to find it.
+  await notesWriter.uploaded(mediaItem);
 
-    const payload: EnhanceTaskPayload = {
-      job_id: job.id,
-      media_item_id: mediaItem.id,
-      room_id: room.id,
-      session_id: room.sessionId,
-      media_type: mediaType,
-      strategy,
-      input_path: inputPath,
-      output_path: outputPath,
-      params,
-    };
+  const payload: EnhanceTaskPayload = {
+    job_id: job.id,
+    media_item_id: mediaItem.id,
+    room_id: room.id,
+    session_id: room.sessionId,
+    media_type: mediaType,
+    strategy,
+    input_path: inputPath,
+    output_path: outputPath,
+    params,
+  };
 
-    try {
-      await enqueueEnhanceTask(payload, routeJob(payload.media_type, payload.strategy));
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "enqueue failed";
-      const failed = await updateJobFromEvent({
-        jobId: job.id,
-        mediaItemId: mediaItem.id,
-        roomId: room.id,
-        sessionId: room.sessionId,
-        mediaType,
-        strategy,
-        status: "failed",
-        progress: 0,
-        error: message,
-        emittedAt: Date.now(),
-      });
-      if (failed) await notesWriter.finished(mediaItem, failed, []);
-      res.status(502).json({ error: "enqueue_failed", message, mediaItem, job: failed ?? job });
-      return;
-    }
-
-    touch(room.sessionId);
-    await pubsub.publishToRoom(room.id, {
-      type: "media_uploaded",
+  try {
+    await submitJob(job.id, payload, routeJob(payload.media_type, payload.strategy));
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "enqueue failed";
+    const failed = await updateJobFromEvent({
+      jobId: job.id,
+      mediaItemId: mediaItem.id,
       roomId: room.id,
-      mediaItem,
-      job,
+      sessionId: room.sessionId,
+      mediaType,
+      strategy,
+      status: "failed",
+      progress: 0,
+      error: message,
+      emittedAt: Date.now(),
     });
-    res.status(201).json({ mediaItem, job });
-  }),
-);
+    if (failed) await notesWriter.finished(mediaItem, failed, []);
+    res.status(502).json({ error: "enqueue_failed", message, mediaItem, job: failed ?? job });
+    return;
+  }
+
+  touch(room.sessionId);
+  await pubsub.publishToRoom(room.id, {
+    type: "media_uploaded",
+    roomId: room.id,
+    mediaItem,
+    job,
+  });
+  res.status(201).json({ mediaItem, job });
+}
 
 export const filesRouter = Router();
 

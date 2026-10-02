@@ -9,6 +9,10 @@ export interface Session {
   createdAt: number;
   /** New people wait until the session's owner lets them in. */
   waitingRoom: boolean;
+  /** The owner chose to keep it through longer quiet spells. */
+  kept: boolean;
+  /** Days without activity before it is deleted, everything in it: what `kept` decides. */
+  retentionDays: number;
 }
 
 export interface Room {

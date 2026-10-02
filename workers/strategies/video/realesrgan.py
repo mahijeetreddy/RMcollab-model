@@ -59,6 +59,13 @@ class RealEsrganVideo(BaseEnhancer):
     def available(cls) -> bool:
         return vio.ffmpeg_available() and RealEsrgan.available()
 
+    @classmethod
+    def unavailable_reason(cls) -> str:
+        # Every frame is a photo's worth of upscaling, so the image strategy's
+        # reason holds a hundredfold.
+        reason = RealEsrgan.unavailable_reason()
+        return reason.replace("one photo would take", "each frame would take") if reason else ""
+
     def enhance(
         self,
         input_path: Path,

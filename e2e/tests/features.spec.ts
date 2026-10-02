@@ -288,10 +288,10 @@ test("with the waiting room on, newcomers wait until the owner lets them in", as
   await expect(dan.getByText("Alice will let you into")).toBeVisible();
   await expect(dan.locator("#room-heading")).toHaveCount(0);
   // Only the owner is asked.
-  const request = page.getByRole("alertdialog", { name: "Dan wants to join" });
+  const request = page.getByRole("group", { name: "Dan wants to join" });
   await expect(request).toBeVisible();
   await shot(page, "waiting-room-request");
-  await expect(early.getByRole("alertdialog")).toHaveCount(0);
+  await expect(early.getByRole("group", { name: /wants to join/ })).toHaveCount(0);
   await request.getByRole("button", { name: "Admit" }).click();
   await expect(dan.locator("#room-heading")).toHaveText("Main Room");
   await expect(request).toHaveCount(0);
@@ -306,7 +306,7 @@ test("with the waiting room on, newcomers wait until the owner lets them in", as
   await eve.getByPlaceholder("Ada").fill("Eve");
   await eve.getByRole("button", { name: /join session/i }).click();
   await expect(eve.getByRole("heading", { name: "Waiting to be let in" })).toBeVisible();
-  await page.getByRole("alertdialog", { name: "Eve wants to join" }).getByRole("button", { name: "Deny" }).click();
+  await page.getByRole("group", { name: "Eve wants to join" }).getByRole("button", { name: "Deny" }).click();
   await expect(eve.locator(".landing-notice")).toHaveText("Alice didn't let you into the session.");
   await expect(page.getByRole("button", { name: "Remove Eve" })).toHaveCount(0);
 });

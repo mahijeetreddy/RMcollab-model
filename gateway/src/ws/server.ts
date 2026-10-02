@@ -31,6 +31,7 @@ import { docHub } from "../docs/hub.js";
 import { touch } from "../lifecycle.js";
 import { codeGuessesBlocked, recordCodeMiss } from "../limits.js";
 import { pubsub } from "./pubsub.js";
+import { socketLimits, type SocketLimits } from "./rateLimit.js";
 import { roomRegistry, sessionRegistry } from "./registry.js";
 
 const clientEventSchema: z.ZodType<ClientEvent> = z.discriminatedUnion("type", [
@@ -102,6 +103,8 @@ interface ConnectionState {
    * the person landed back in the main room.
    */
   queue: Promise<void>;
+  /** What this connection may still send; see rateLimit.ts. */
+  limits: SocketLimits;
   /**
    * Removed or turned away, and being closed. Its frames are ignored from here;
    * the state itself stays until the close event, whose cleanup (leave the
@@ -317,6 +320,35 @@ async function handleChatMessage(
   await pubsub.publishToRoom(event.roomId, { type: "chat_message", roomId: event.roomId, message });
 }
 
+/**
+ * Whether this frame is within the connection's limits. Chat and room switches
+ * are refused with a reason; typing is dropped, as nobody needs to know. Notes
+ * frames close the connection instead: dropping one would leave that editor's
+ * copy and everyone else's apart, while a reconnect resyncs the whole document.
+ */
+function withinLimits(socket: WebSocket, state: ConnectionState, event: ClientEvent): boolean {
+  const { limits } = state;
+  switch (event.type) {
+    case "chat_message":
+      if (limits.chat.take()) return true;
+      fail(socket, "rate_limited", "You're sending messages very fast. Wait a moment.");
+      return false;
+    case "typing":
+      return limits.typing.take();
+    case "join_room":
+      if (limits.joins.take()) return true;
+      fail(socket, "rate_limited", "Too many room switches at once. Wait a moment.");
+      return false;
+    case "doc":
+      if (limits.docFrames.take() && limits.docBytes.take(event.data.length)) return true;
+      state.closing = true;
+      socket.close(4008, "too much notes traffic");
+      return false;
+    default:
+      return true;
+  }
+}
+
 async function handleEvent(
   socket: WebSocket,
   state: ConnectionState,
@@ -334,6 +366,7 @@ async function handleEvent(
     fail(socket, "waiting_for_admission", "You are waiting to be let in.");
     return;
   }
+  if (!withinLimits(socket, state, event)) return;
   // Anything a person does keeps their session from expiring.
   if (event.type !== "ping") touch(state.sessionId);
   switch (event.type) {
@@ -478,6 +511,18 @@ export function createWebSocketServer(httpServer: Server): WebSocketServer {
     },
     onSessionEvent(sessionId, event) {
       if (event.type === "participant_removed") removeLocally(event);
+      if (event.type === "session_ended") {
+        // Its notes go unsaved: the rows are being deleted, and a save racing
+        // that would only fail. Then every connection to it is told and closed.
+        for (const roomId of event.roomIds) for (const key of docHub.keysOf(roomId)) docHub.discard(key);
+        for (const [socket, state] of states) {
+          if (state.sessionId !== sessionId) continue;
+          send(socket, event);
+          state.closing = true;
+          socket.close(4003, "session ended");
+        }
+        return;
+      }
       if (event.type === "admission_decided") {
         for (const [socket, state] of states) {
           if (state.participantId !== event.participantId || !state.pending) continue;
@@ -499,6 +544,9 @@ export function createWebSocketServer(httpServer: Server): WebSocketServer {
     },
   });
 
+  /** Open connections per address on this replica, for the cap below. */
+  const perAddress = new Map<string, number>();
+
   wss.on("connection", (socket, request) => {
     // The last entry: the one the load balancer appended. Earlier ones are
     // whatever the client sent, and trusting them would let anyone reset the
@@ -511,6 +559,7 @@ export function createWebSocketServer(httpServer: Server): WebSocketServer {
       closing: false,
       preferredRoomId: null,
       queue: Promise.resolve(),
+      limits: socketLimits(),
       connId: nanoid(12),
       participantId: null,
       sessionId: null,
@@ -518,6 +567,21 @@ export function createWebSocketServer(httpServer: Server): WebSocketServer {
       roomId: null,
       alive: true,
     };
+    // One address may hold this many connections at once. Generous - a class
+    // on school wifi is one address - but finite: each open socket holds
+    // memory, and a script could otherwise open them until the replica falls.
+    const open = (perAddress.get(state.address) ?? 0) + 1;
+    if (open > config.limits.connectionsPerAddress) {
+      socket.close(1013, "too many connections from this address");
+      return;
+    }
+    perAddress.set(state.address, open);
+    socket.once("close", () => {
+      const left = (perAddress.get(state.address) ?? 1) - 1;
+      if (left > 0) perAddress.set(state.address, left);
+      else perAddress.delete(state.address);
+    });
+
     states.set(socket, state);
 
     socket.on("pong", () => {

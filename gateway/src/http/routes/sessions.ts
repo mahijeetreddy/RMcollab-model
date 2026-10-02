@@ -4,18 +4,23 @@ import {
   createRoom,
   createSession,
   getParticipant,
+  deleteSession,
   getSessionByCode,
+  isAdmittedMember,
   isWaiting,
   listRooms,
   listWaiting,
   removeFromSession,
   sessionOwnerId,
+  setSessionKept,
+  setSessionOwner,
   setWaiting,
   setWaitingRoom,
 } from "../../db/repositories.js";
+import { roomFolder, storage } from "../../storage/local.js";
 import { pubsub } from "../../ws/pubsub.js";
 import { createDemo } from "../../demo.js";
-import { checkDemo, codeGuessesBlocked, recordCodeMiss } from "../../limits.js";
+import { checkDemo, checkSessionCreate, codeGuessesBlocked, recordCodeMiss } from "../../limits.js";
 import { asyncHandler } from "../asyncHandler.js";
 import { sendRefusal } from "./media.js";
 import { routeParam } from "../params.js";
@@ -46,18 +51,24 @@ async function asOwner(req: Request, res: Response) {
   return { session, owner: owner! };
 }
 
-// The waiting room, switched on or off by the session's owner.
+// The session's settings, the owner's to change: the waiting room, and keeping
+// it through longer quiet spells.
 sessionsRouter.patch(
   "/api/sessions/:code",
   asyncHandler(async (req, res) => {
     const found = await asOwner(req, res);
     if (!found) return;
-    const parsed = z.object({ waitingRoom: z.boolean() }).safeParse(req.body ?? {});
+    const parsed = z
+      .object({ waitingRoom: z.boolean().optional(), kept: z.boolean().optional() })
+      .refine((b) => b.waitingRoom !== undefined || b.kept !== undefined)
+      .safeParse(req.body ?? {});
     if (!parsed.success) {
-      res.status(400).json({ error: "invalid_body" });
+      res.status(400).json({ error: "invalid_body", message: "waitingRoom or kept is required." });
       return;
     }
-    const session = await setWaitingRoom(found.session.id, parsed.data.waitingRoom);
+    let session = found.session;
+    if (parsed.data.waitingRoom !== undefined) session = (await setWaitingRoom(session.id, parsed.data.waitingRoom)) ?? session;
+    if (parsed.data.kept !== undefined) session = (await setSessionKept(session.id, parsed.data.kept)) ?? session;
     if (session) await pubsub.publishToSession(session.id, { type: "session_updated", session });
     res.json({ session });
   }),
@@ -100,6 +111,68 @@ sessionsRouter.post(
   }),
 );
 
+// "End session now": everyone is told and sent back to the start, then the
+// session goes - rooms, notes, chat, uploads and their files - at once rather
+// than after three idle days. Told first, so nobody is left looking at a room
+// whose rows are disappearing under them.
+sessionsRouter.delete(
+  "/api/sessions/:code",
+  asyncHandler(async (req, res) => {
+    const found = await asOwner(req, res);
+    if (!found) return;
+    const rooms = await listRooms(found.session.id);
+    await pubsub.publishToSession(found.session.id, {
+      type: "session_ended",
+      sessionId: found.session.id,
+      byName: found.owner.displayName,
+      roomIds: rooms.map((room) => room.id),
+    });
+    await deleteSession(found.session.id);
+    for (const room of rooms) {
+      await storage.removeTree(roomFolder(room.id)).catch((err: unknown) =>
+        console.warn("[sessions] could not remove files for room", room.id, err),
+      );
+    }
+    res.status(204).end();
+  }),
+);
+
+// Handing the session to someone else in it: they get the owner's controls
+// (waiting room, removing people, ending it), and the previous owner becomes
+// an ordinary member. For when the owner is leaving, or as a backstop before
+// they lose the browser that holds their identity.
+sessionsRouter.post(
+  "/api/sessions/:code/owner",
+  asyncHandler(async (req, res) => {
+    const found = await asOwner(req, res);
+    if (!found) return;
+    const parsed = z.object({ targetId: z.string().trim().min(1).max(64) }).safeParse(req.body ?? {});
+    const target = parsed.success ? await getParticipant(parsed.data.targetId) : null;
+    if (!parsed.success || !target || target.sessionId !== found.session.id || !(await isAdmittedMember(found.session.id, target.id))) {
+      res.status(404).json({ error: "not_found", message: "They are no longer in this session." });
+      return;
+    }
+    if (target.id === found.owner.id) {
+      res.status(400).json({ error: "already_owner", message: "You already own this session." });
+      return;
+    }
+    await setSessionOwner(found.session.id, target.id);
+    await pubsub.publishToSession(found.session.id, {
+      type: "rooms_updated",
+      sessionId: found.session.id,
+      rooms: await listRooms(found.session.id),
+    });
+    await pubsub.publishToSession(found.session.id, {
+      type: "owner_changed",
+      sessionId: found.session.id,
+      ownerId: target.id,
+      ownerName: target.displayName,
+      byName: found.owner.displayName,
+    });
+    res.status(204).end();
+  }),
+);
+
 // "Try a sample room": a session already holding analysed material.
 sessionsRouter.post(
   "/api/demo",
@@ -122,6 +195,11 @@ sessionsRouter.post(
       return;
     }
 
+    const refusal = await checkSessionCreate(req.ip ?? "unknown");
+    if (refusal) {
+      sendRefusal(res, refusal);
+      return;
+    }
     const session = await createSession(parsed.data.name ?? null);
     const mainRoom = await createRoom(session.id, parsed.data.mainRoomName ?? "Main Room", true);
     res.status(201).json({ session, rooms: [mainRoom] });

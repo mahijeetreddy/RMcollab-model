@@ -1,10 +1,12 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { mkdir, open, readdir, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, open, readdir, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { config } from "../config.js";
 
 export interface StorageAdapter {
   save(relPath: string, data: Buffer): Promise<void>;
+  /** Moves a file already on disk (an upload streamed to a temp file) to `relPath`. */
+  moveIn(absoluteSource: string, relPath: string): Promise<void>;
   /** Absolute on-disk path; throws if relPath escapes the storage root. */
   resolve(relPath: string): string;
   publicUrl(relPath: string): string;
@@ -33,6 +35,19 @@ class LocalStorage implements StorageAdapter {
     const absolute = this.resolve(relPath);
     await mkdir(path.dirname(absolute), { recursive: true });
     await writeFile(absolute, data);
+  }
+
+  async moveIn(absoluteSource: string, relPath: string): Promise<void> {
+    const absolute = this.resolve(relPath);
+    await mkdir(path.dirname(absolute), { recursive: true });
+    try {
+      await rename(absoluteSource, absolute);
+    } catch (err) {
+      // Another filesystem (a temp dir on a different volume): copy, then remove.
+      if ((err as NodeJS.ErrnoException).code !== "EXDEV") throw err;
+      await copyFile(absoluteSource, absolute);
+      await unlink(absoluteSource);
+    }
   }
 
   async readText(relPath: string, maxBytes: number): Promise<string | null> {
@@ -103,6 +118,48 @@ export function verifyFileSignature(
 }
 
 export const storage: StorageAdapter = new LocalStorage();
+
+/**
+ * Where uploads stream while they arrive, inside the storage root so that
+ * moving one into place is a rename. Not under rooms/, so the orphan sweep
+ * never mistakes an upload in progress for something left behind.
+ */
+export const uploadTempDir = path.join(root, "tmp", "uploads");
+
+/** The first `bytes` of a file on disk: enough to tell what it is. */
+export async function readHead(absolute: string, bytes: number): Promise<Buffer> {
+  const handle = await open(absolute, "r");
+  try {
+    const buffer = Buffer.alloc(bytes);
+    const { bytesRead } = await handle.read(buffer, 0, bytes, 0);
+    return buffer.subarray(0, bytesRead);
+  } finally {
+    await handle.close();
+  }
+}
+
+/** Temp uploads older than `maxAgeMs`: a crash or a dropped connection left them. */
+export async function sweepUploadTemp(maxAgeMs: number, now = Date.now()): Promise<number> {
+  let removed = 0;
+  let names: string[] = [];
+  try {
+    names = await readdir(uploadTempDir);
+  } catch {
+    return 0;
+  }
+  for (const name of names) {
+    const file = path.join(uploadTempDir, name);
+    try {
+      if (now - (await stat(file)).mtimeMs > maxAgeMs) {
+        await rm(file, { force: true });
+        removed += 1;
+      }
+    } catch {
+      // Gone already.
+    }
+  }
+  return removed;
+}
 
 export const originalPath = (roomId: string, mediaItemId: string, ext: string): string =>
   `rooms/${roomId}/${mediaItemId}/original.${ext}`;

@@ -1,11 +1,11 @@
 import { config } from "./config.js";
 import { pool } from "./db/pool.js";
 import { deleteSession, existingMediaItems, existingRooms, idleSessions, touchSession } from "./db/repositories.js";
-import { mediaFolder, roomFolder, storage } from "./storage/local.js";
+import { mediaFolder, roomFolder, storage, sweepUploadTemp } from "./storage/local.js";
 
 /**
  * How long anything lives. A session nobody has touched for SESSION_TTL_DAYS
- * (3 by default) is deleted - rooms, uploads, notes, chat, files - and storage
+ * (3 by default) - or SESSION_KEEP_DAYS (30) if its owner chose to keep it - is deleted - rooms, uploads, notes, chat, files - and storage
  * nothing points at any more is swept. Rooms are workspaces for a study
  * session, not an archive; the landing page says so.
  *
@@ -47,7 +47,7 @@ export async function sweep(now = Date.now()): Promise<SweepResult> {
     if (!rows[0]?.locked) return result;
     try {
       for (;;) {
-        const idle = await idleSessions(now - config.sessionTtlMs);
+        const idle = await idleSessions(now - config.sessionTtlMs, now - config.sessionKeepMs);
         if (idle.length === 0) break;
         for (const session of idle) {
           await deleteSession(session.id);
@@ -58,6 +58,10 @@ export async function sweep(now = Date.now()): Promise<SweepResult> {
           result.sessions += 1;
         }
       }
+
+      // Uploads that never finished arriving (a dropped connection, a crash).
+      // An hour is far longer than any upload takes.
+      await sweepUploadTemp(60 * 60 * 1000, now);
 
       // Left behind: a worker that finished writing after its upload was
       // deleted, or a crash between deleting a row and its files.

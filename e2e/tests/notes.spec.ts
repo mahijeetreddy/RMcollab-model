@@ -111,3 +111,42 @@ test.describe("room notes", () => {
     await expect(alice.locator(".job-card").first()).toBeFocused();
   });
 });
+
+test("words typed while the connection is down reach the room once it is back", async ({ page }) => {
+  // Regression: a dropped connection took the whole room view down until the
+  // snapshot came back, unmounting the editor and destroying its document -
+  // and with it anything typed that the server had not yet received.
+  await page.addInitScript(() => {
+    const Native = window.WebSocket;
+    const w = window as unknown as { __sockets: WebSocket[] };
+    w.__sockets = [];
+    window.WebSocket = class extends Native {
+      constructor(url: string | URL, protocols?: string | string[]) {
+        super(url, protocols);
+        w.__sockets.push(this);
+      }
+    } as typeof WebSocket;
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: /create session/i }).click();
+  await page.getByPlaceholder("Ada").fill("Alice");
+  await page.getByRole("button", { name: /join session/i }).click();
+  await openRoomNotes(page);
+  const prose = page.locator(".notes-prose");
+  await prose.click();
+  await page.keyboard.type("Before the drop. ");
+  await expect(page.locator(".gdoc-save")).toHaveClass(/is-synced/);
+
+  // Cut the socket, and keep typing straight away, while it is down.
+  await page.evaluate(() => (window as unknown as { __sockets: WebSocket[] }).__sockets.at(-1)!.close(4000, "test drop"));
+  await page.keyboard.type("Typed while offline.");
+  // The editor stayed put: focus and the words are still there.
+  await expect(prose).toBeFocused();
+  await expect(prose).toContainText("Typed while offline.");
+  await expect(page.locator(".gdoc-save")).toHaveClass(/is-synced/, { timeout: 20_000 });
+
+  // A fresh page load reads the room's own copy.
+  await page.reload();
+  await openRoomNotes(page);
+  await expect(page.locator(".notes-prose")).toContainText("Before the drop. Typed while offline.");
+});

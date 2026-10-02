@@ -16,10 +16,10 @@ export function WaitingScreen({
 }) {
   return (
     <main className="waiting" id="main-content">
-      <div className="waiting-card" role="status" aria-live="polite">
+      <div className="waiting-card">
         <span className="waiting-pulse" aria-hidden="true" />
         <h1>Waiting to be let in</h1>
-        <p>
+        <p role="status">
           {ownerName ? `${ownerName} will let you into` : "The session's owner will let you into"}{" "}
           {sessionName ? <strong>{sessionName}</strong> : "this session"} shortly. This page updates by itself.
         </p>
@@ -81,8 +81,12 @@ export function AdmissionRequests({
 
   return (
     <div className="admissions" role="region" aria-label="People waiting to join">
+      {/* Announced, not focused: the owner may be in the middle of typing. */}
+      <p className="visually-hidden" aria-live="polite">
+        {waiting.map((p) => `${p.displayName} wants to join.`).join(" ")}
+      </p>
       {waiting.map((p) => (
-        <div key={p.id} className="admission" role="alertdialog" aria-label={`${p.displayName} wants to join`}>
+        <div key={p.id} className="admission" role="group" aria-label={`${p.displayName} wants to join`}>
           <span className="admission-avatar" aria-hidden="true">
             {p.displayName.slice(0, 1).toUpperCase()}
           </span>
@@ -168,6 +172,115 @@ export function NewCodeNotice({ code, name, onClose }: { code: string; name: str
           {copied ? "Copied" : "Copy new code"}
         </button>
       </div>
+    </div>
+  );
+}
+
+/** For the owner: ends the session for everyone, deleting everything in it. Asks first. */
+export function EndSession({ sessionCode, ownerId }: { sessionCode: string; ownerId: string }) {
+  const [asking, setAsking] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const end = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      // Everyone, this browser included, is then sent back to the start by the
+      // session_ended event; nothing else to do here.
+      await api.endSession(sessionCode, ownerId);
+    } catch (cause) {
+      setError(message(cause, "Could not end the session."));
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="end-session">
+      {asking ? (
+        <div
+          className="end-session-confirm"
+          role="alertdialog"
+          aria-label="End the session for everyone?"
+          onKeyDown={(event) => event.key === "Escape" && !busy && setAsking(false)}
+        >
+          <p>
+            End the session for everyone? All rooms, notes, chat and uploads are deleted now, not in three days. This
+            can't be undone.
+          </p>
+          <div className="job-confirm-actions">
+            {/* Focus on the safe choice: Enter must never delete a session by accident. */}
+            <button type="button" className="ghost" onClick={() => setAsking(false)} disabled={busy} autoFocus>
+              Cancel
+            </button>
+            <button type="button" className="danger" onClick={() => void end()} disabled={busy}>
+              {busy ? "Ending…" : "End and delete everything"}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button type="button" className="ghost end-session-button" onClick={() => setAsking(true)}>
+          End session…
+        </button>
+      )}
+      {error && (
+        <p className="error-text" role="alert">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * How long the session lasts, for everyone in it; for the owner, the switch.
+ * A group that meets weekly needs the longer one, or its room is gone between
+ * meetings.
+ */
+export function SessionRetention({
+  sessionCode,
+  ownerId,
+  kept,
+  days,
+}: {
+  sessionCode: string;
+  /** Set for the owner, who gets the switch; others just see how long it lasts. */
+  ownerId: string | null;
+  kept: boolean;
+  days: number;
+}) {
+  const [wanted, setWanted] = useState<boolean | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    if (wanted === kept) setWanted(null);
+  }, [kept, wanted]);
+  const lasts = `Deleted after ${days} days without activity.`;
+  if (!ownerId) {
+    return <p className="retention-note">{lasts}</p>;
+  }
+  const toggle = async () => {
+    const next = !(wanted ?? kept);
+    setWanted(next);
+    setError(null);
+    try {
+      await api.setSessionKept(sessionCode, ownerId, next);
+    } catch (cause) {
+      setWanted(null);
+      setError(message(cause, "Could not change it."));
+    }
+  };
+  return (
+    <div className="waiting-toggle">
+      <label className="waiting-toggle-row">
+        <input type="checkbox" role="switch" checked={wanted ?? kept} onChange={() => void toggle()} />
+        <span>
+          <span className="waiting-toggle-title">Keep for 30 days</span>
+          <span className="waiting-toggle-detail">{lasts} For a group that meets weekly.</span>
+        </span>
+      </label>
+      {error && (
+        <p className="error-text" role="alert">
+          {error}
+        </p>
+      )}
     </div>
   );
 }

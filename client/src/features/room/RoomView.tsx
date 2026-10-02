@@ -1,4 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { api } from "../../api/client";
 import type { LibraryEntry } from "@rmcollab/shared";
 import type { SourceTarget } from "../ask/sourceLinks";
 import { AskDock } from "../ask/AskDock";
@@ -35,7 +36,7 @@ function readSavedView(): RoomViewName {
 }
 import { icons } from "../notes/icons";
 import { AddMedia } from "../upload/AddMedia";
-import { AdmissionRequests, WaitingRoomToggle } from "./Admission";
+import { AdmissionRequests, EndSession, SessionRetention, WaitingRoomToggle } from "./Admission";
 import { ParticipantList } from "./ParticipantList";
 import { RoomSwitcher } from "./RoomSwitcher";
 import type { Realtime } from "../../ws/useRealtime";
@@ -209,6 +210,27 @@ export function RoomView({ realtime, sessionCode }: Props) {
     listedDocs.current = ids;
   }, [state.documents, openDoc]);
 
+  // A chat message deleted by its author or an owner; the room hears it as an event.
+  const deleteMessage = useCallback(
+    async (messageId: string) => {
+      if (!state.activeRoomId || !state.me) return;
+      await api.deleteMessage(state.activeRoomId, messageId, state.me.id);
+    },
+    [state.activeRoomId, state.me],
+  );
+
+  // The session changed hands: say so, and say it to the new owner in particular.
+  const ownerChange = state.ownerChange;
+  useEffect(() => {
+    if (!ownerChange) return;
+    setRemovedNotice(
+      ownerChange.ownerId === state.me?.id
+        ? `${ownerChange.byName} made you the owner of this session.`
+        : `${ownerChange.ownerName} is now the owner of this session.`,
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ownerChange?.at]);
+
   // Refused re-entry to a room they were removed from: back to the main room,
   // rather than left looking at a room they are not in.
   useEffect(() => {
@@ -237,8 +259,11 @@ export function RoomView({ realtime, sessionCode }: Props) {
   // inside the drawer and closing it would hide the prompt.
   const [navOpen, setNavOpen] = useState(false);
   useEffect(() => {
-    if (state.synced) setNavOpen(false);
-  }, [state.activeRoomId, state.synced]);
+    if (state.loadedRoomId) setNavOpen(false);
+  }, [state.loadedRoomId]);
+  // Up from the first snapshot of a room until another room is chosen - through
+  // reconnects too (see loadedRoomId), so a blip never takes the notes down.
+  const roomShown = state.activeRoomId !== null && state.loadedRoomId === state.activeRoomId;
   useEffect(() => {
     if (!navOpen) return;
     const onKey = (event: KeyboardEvent) => {
@@ -284,11 +309,21 @@ export function RoomView({ realtime, sessionCode }: Props) {
             on={Boolean(state.session.waitingRoom)}
           />
         )}
+        {state.session && (
+          <SessionRetention
+            sessionCode={state.session.code}
+            ownerId={mainOwner && state.me ? state.me.id : null}
+            kept={Boolean(state.session.kept)}
+            days={state.session.retentionDays ?? 3}
+          />
+        )}
+        {mainOwner && state.me && state.session && <EndSession sessionCode={state.session.code} ownerId={state.me.id} />}
         <ParticipantList
           participants={state.participants}
           meId={state.me?.id ?? null}
           ownerId={activeRoom?.ownerId ?? null}
           room={activeRoom}
+          sessionCode={state.session?.code ?? null}
         />
       </aside>
       {navOpen && (
@@ -373,7 +408,7 @@ export function RoomView({ realtime, sessionCode }: Props) {
         </div>
 
         <div className="panel-body">
-          {!state.synced ? (
+          {!roomShown ? (
             <p className="empty">Waiting for the room snapshot…</p>
           ) : view === "notes" && state.activeRoomId && state.me && openDoc === null ? (
             <NotesHome
@@ -453,6 +488,8 @@ export function RoomView({ realtime, sessionCode }: Props) {
           onTyping={sendTyping}
           open={dock === "chat"}
           onOpenChange={setDockOpen("chat")}
+          canModerate={mainOwner || Boolean(state.me && activeRoom?.ownerId === state.me.id)}
+          onDelete={deleteMessage}
         />
       </div>
     </main>

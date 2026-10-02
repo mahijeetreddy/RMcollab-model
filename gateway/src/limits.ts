@@ -40,14 +40,22 @@ async function within(key: string, windowS: number, max: number): Promise<{ ok: 
     .zremrangebyscore(full, 0, since)
     .zadd(full, now, `${now}:${Math.random().toString(36).slice(2, 8)}`)
     .zcard(full)
-    .zrange(full, 0, 0, "WITHSCORES")
     .expire(full, windowS + 5)
     .exec()) as [Error | null, unknown][];
   const count = Number(results[2]?.[1] ?? 0);
-  const oldest = Number((results[3]?.[1] as string[] | undefined)?.[1] ?? now);
-  // When the oldest counted event leaves the window, there is room again.
-  const retryAfterS = Math.max(1, Math.ceil((oldest + windowS * 1000 - now) / 1000));
-  return { ok: count <= max, retryAfterS };
+  if (count <= max) return { ok: true, retryAfterS: 0 };
+  return { ok: false, retryAfterS: retryAfter(await client().zrange(full, count - max, count - max, "WITHSCORES"), windowS, now) };
+}
+
+/**
+ * When a retry would fit. Refused attempts are counted too, so it is not when
+ * the oldest event leaves the window: the retry adds one of its own, and fits
+ * only once all but max - 1 of what is there now have gone - that is, once the
+ * event at index (count - max), oldest first, has left. `entry` is that event.
+ */
+export function retryAfter(entry: string[], windowS: number, now: number): number {
+  const at = Number(entry[1] ?? now);
+  return Math.max(1, Math.ceil((at + windowS * 1000 - now) / 1000));
 }
 
 const mb = (bytes: number) => `${Math.round(bytes / (1024 * 1024))} MB`;
@@ -98,7 +106,30 @@ export async function checkUpload(input: {
     console.warn("[limits] rate check skipped", err instanceof Error ? err.message : err);
   }
 
-  const { rows } = await pool.query<{ room_bytes: string; session_bytes: string; active_jobs: string }>(
+  const usage = await usageOf(pool, input.sessionId, input.roomId);
+  if (usage.activeJobs >= l.activeJobsPerSession) {
+    return {
+      status: 429,
+      error: "too_many_jobs",
+      message: `This session already has ${l.activeJobsPerSession} items being processed. Add more once some finish.`,
+      retryAfterS: 30,
+    };
+  }
+  return storageRefusal(usage, input.bytes);
+}
+
+interface Queryable {
+  query: typeof pool.query;
+}
+
+interface Usage {
+  roomBytes: number;
+  sessionBytes: number;
+  activeJobs: number;
+}
+
+async function usageOf(db: Queryable, sessionId: string, roomId: string): Promise<Usage> {
+  const { rows } = await db.query<{ room_bytes: string; session_bytes: string; active_jobs: string }>(
     `SELECT
        coalesce(sum(m.size_bytes) FILTER (WHERE m.room_id = $2), 0) AS room_bytes,
        coalesce(sum(m.size_bytes), 0) AS session_bytes,
@@ -108,25 +139,22 @@ export async function checkUpload(input: {
           WHERE rj.session_id = $1 AND j.status IN ('queued', 'processing')) AS active_jobs
      FROM media_items m JOIN rooms r ON r.id = m.room_id
      WHERE r.session_id = $1`,
-    [input.sessionId, input.roomId],
+    [sessionId, roomId],
   );
-  const usage = rows[0]!;
-  if (Number(usage.active_jobs) >= l.activeJobsPerSession) {
-    return {
-      status: 429,
-      error: "too_many_jobs",
-      message: `This session already has ${l.activeJobsPerSession} items being processed. Add more once some finish.`,
-      retryAfterS: 30,
-    };
-  }
-  if (Number(usage.room_bytes) + input.bytes > l.roomStorageBytes) {
+  const row = rows[0]!;
+  return { roomBytes: Number(row.room_bytes), sessionBytes: Number(row.session_bytes), activeJobs: Number(row.active_jobs) };
+}
+
+function storageRefusal(usage: Usage, bytes: number): Refusal | null {
+  const l = config.limits;
+  if (usage.roomBytes + bytes > l.roomStorageBytes) {
     return {
       status: 413,
       error: "room_storage_full",
       message: `This room is full: it holds up to ${mb(l.roomStorageBytes)} of uploads. Delete something to make room.`,
     };
   }
-  if (Number(usage.session_bytes) + input.bytes > l.sessionStorageBytes) {
+  if (usage.sessionBytes + bytes > l.sessionStorageBytes) {
     return {
       status: 413,
       error: "session_storage_full",
@@ -134,6 +162,31 @@ export async function checkUpload(input: {
     };
   }
   return null;
+}
+
+/**
+ * The storage check and the upload's row, as one step per session. Checked
+ * separately, two uploads arriving together each saw room for itself and both
+ * went in, past the limit. Here the second waits for the first's row to exist
+ * before it measures. `commit` is what records the upload (its insert).
+ */
+export async function withStorageReserved<T>(
+  input: { sessionId: string; roomId: string; bytes: number },
+  commit: () => Promise<T>,
+): Promise<{ refusal: Refusal } | { value: T }> {
+  const client = await pool.connect();
+  try {
+    await client.query(`SELECT pg_advisory_lock(hashtext($1))`, [`rmcollab:storage:${input.sessionId}`]);
+    try {
+      const refusal = storageRefusal(await usageOf(client, input.sessionId, input.roomId), input.bytes);
+      if (refusal) return { refusal };
+      return { value: await commit() };
+    } finally {
+      await client.query(`SELECT pg_advisory_unlock(hashtext($1))`, [`rmcollab:storage:${input.sessionId}`]);
+    }
+  } finally {
+    client.release();
+  }
 }
 
 /**
@@ -175,6 +228,24 @@ export async function checkDemo(address: string): Promise<Refusal | null> {
         status: 429,
         error: "demo_rate_limited",
         message: "You've opened several sample rooms already. Rejoin one from Recent sessions, or try again later.",
+        retryAfterS: hour.retryAfterS,
+      };
+    }
+  } catch {
+    // Fail open, as above.
+  }
+  return null;
+}
+
+/** New sessions from one address. Each is rows and a room; a script could make millions. */
+export async function checkSessionCreate(address: string): Promise<Refusal | null> {
+  try {
+    const hour = await within(`session:${address}`, 3600, config.limits.sessionsPerAddressPerHour);
+    if (!hour.ok) {
+      return {
+        status: 429,
+        error: "session_rate_limited",
+        message: "Lots of new sessions from here this hour. Rejoin one from Recent sessions, or try again later.",
         retryAfterS: hour.retryAfterS,
       };
     }

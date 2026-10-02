@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import logging
 import math
+import os
 import time
 import urllib.error
 import urllib.request
@@ -327,6 +328,37 @@ def _write(path: Path, bgr: Any) -> None:
 
 # The fallback, not the default: image's default is reading it into notes
 # (notes.py), which needs a vision model. Without one, this is what runs.
+def gpu_present() -> bool:
+    """A CUDA card this worker can use. Asked once per process; torch is imported lazily."""
+    global _GPU_PRESENT
+    if _GPU_PRESENT is None:
+        try:
+            import torch
+
+            _GPU_PRESENT = bool(torch.cuda.is_available())
+        except Exception:  # torch missing or its CUDA runtime broken: no GPU to speak of
+            _GPU_PRESENT = False
+    return _GPU_PRESENT
+
+
+_GPU_PRESENT: bool | None = None
+
+# Measured (workers/tools/cpu_bench.py): with 4 CPU cores and no GPU, one
+# 1.6-megapixel photo had not finished after 28 minutes - over 17 minutes a
+# megapixel - where the 4GB GPU takes seconds. On a CPU-only host (Oracle's free
+# ARM machines) the strategy is therefore offered as unavailable, with the reason,
+# and the image pool falls back to one that runs. ALLOW_CPU_UPSCALE=true offers it
+# anyway, for someone who would rather wait.
+CPU_TOO_SLOW = (
+    "Upscaling needs a GPU, and this server has none: one photo would take tens of minutes. "
+    "Sharpening works on any machine."
+)
+
+
+def cpu_upscale_allowed() -> bool:
+    return os.environ.get("ALLOW_CPU_UPSCALE", "").strip().lower() == "true"
+
+
 @register(fallback=True)
 class RealEsrgan(BaseEnhancer):
     name = "realesrgan"
@@ -343,7 +375,15 @@ class RealEsrgan(BaseEnhancer):
     def available(cls) -> bool:
         if importlib.util.find_spec("torch") is None or importlib.util.find_spec("cv2") is None:
             return False
+        if not (gpu_present() or cpu_upscale_allowed()):
+            return False
         return _weights_reachable()
+
+    @classmethod
+    def unavailable_reason(cls) -> str:
+        if importlib.util.find_spec("torch") is not None and not (gpu_present() or cpu_upscale_allowed()):
+            return CPU_TOO_SLOW
+        return ""
 
     def enhance(
         self,

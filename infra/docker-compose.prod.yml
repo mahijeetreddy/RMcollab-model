@@ -1,0 +1,149 @@
+# Production, layered over docker-compose.yml:
+#
+#   docker compose --env-file .env -f infra/docker-compose.yml -f infra/docker-compose.prod.yml up -d --build
+#
+# (from the repo root; add -f infra/docker-compose.gpu.yml on a host with an
+# NVIDIA GPU). What changes from development:
+#   - one public entrance, `web`: Caddy on 80/443 with a certificate it gets
+#     and renews itself, serving the built client and proxying the gateway
+#   - the Vite dev server and the dev load balancer are not run
+#   - Postgres and Redis have passwords and no ports on the host
+#   - every secret is required: compose refuses to start without it, and the
+#     gateway refuses to start with a development default (config.ts)
+#   - no GPU is assumed; every strategy runs on CPU, only slower
+#
+# Required in .env: DOMAIN, FILE_SIGNING_SECRET, POSTGRES_PASSWORD,
+# REDIS_PASSWORD. Use `openssl rand -hex 32` for each secret: hex, so it
+# needs no escaping inside a URL. See README "Deploying".
+
+x-redis-url: &redis-url redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}@redis:6379/0
+x-database-url: &database-url postgres://rmcollab:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}@postgres:5432/rmcollab
+
+x-worker-prod: &worker-prod
+  restart: unless-stopped
+  environment:
+    REDIS_URL: *redis-url
+    SENTRY_ENVIRONMENT: production
+  volumes:
+    - storage:/data/storage
+    - models:/models
+
+services:
+  web:
+    build:
+      context: ..
+      dockerfile: infra/web/Dockerfile
+      args:
+        VITE_SENTRY_DSN: ${VITE_SENTRY_DSN:-}
+    image: rmcollab-web:latest
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      # The certificate and its account key: kept, or every restart would ask
+      # Let's Encrypt again and soon hit its rate limit.
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - gateway
+
+  gateway:
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PUBLIC_BASE_URL: https://${DOMAIN}
+      ALLOWED_ORIGINS: https://${DOMAIN}
+      FILE_SIGNING_SECRET: ${FILE_SIGNING_SECRET:?set FILE_SIGNING_SECRET in .env}
+      WEBHOOK_ALLOW_PRIVATE_URLS: "false"
+      DATABASE_URL: *database-url
+      REDIS_URL: *redis-url
+      SENTRY_ENVIRONMENT: production
+      # The development values are lifted for the e2e suite; production keeps the defaults.
+      LIMIT_SESSIONS_PER_HOUR: "30"
+      LIMIT_CONNECTIONS_PER_ADDRESS: "100"
+      # Off unless you use them (config.ts); the dispatcher below only runs with them.
+      WEBHOOKS_ENABLED: ${WEBHOOKS_ENABLED:-false}
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
+    volumes:
+      - storage:/data/storage
+
+  webhook-dispatcher:
+    # Only with webhooks on: `--profile webhooks` and WEBHOOKS_ENABLED=true.
+    profiles: ["webhooks"]
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      WEBHOOK_ALLOW_PRIVATE_URLS: "false"
+      DATABASE_URL: *database-url
+      REDIS_URL: *redis-url
+      SENTRY_ENVIRONMENT: production
+    extra_hosts: !reset []
+
+  postgres:
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    ports: !reset []
+
+  redis:
+    restart: unless-stopped
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}", "--appendonly", "yes"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+    volumes:
+      - redisdata:/data
+    ports: !reset []
+
+  # Nightly database dumps (infra/backup/backup.sh): 03:00 UTC, newest 14 kept,
+  # in ./backups at the repo root. Same image as the database, so pg_dump's
+  # version always matches the server's. Copy them off the machine too - a
+  # backup on the disk it protects survives a bad deploy, not a lost disk.
+  backup:
+    image: rmcollab-postgres:16-pgvector
+    restart: unless-stopped
+    entrypoint: ["sh", "/backup.sh"]
+    environment:
+      PGHOST: postgres
+      PGUSER: rmcollab
+      PGDATABASE: rmcollab
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      BACKUP_KEEP: ${BACKUP_KEEP:-14}
+      BACKUP_HOUR_UTC: ${BACKUP_HOUR_UTC:-3}
+    volumes:
+      - ./backup/backup.sh:/backup.sh:ro
+      - ${BACKUP_DIR:-../backups}:/backups
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  text-worker:
+    <<: *worker-prod
+  ask-worker:
+    <<: *worker-prod
+  image-worker:
+    <<: *worker-prod
+    deploy: !reset {}
+  audio-worker:
+    <<: *worker-prod
+    deploy: !reset {}
+  video-worker:
+    <<: *worker-prod
+    deploy: !reset {}
+
+  # Development only.
+  client:
+    profiles: ["dev"]
+  lb:
+    profiles: ["dev"]
+
+volumes:
+  storage:
+  redisdata:
+  caddy_data:
+  caddy_config:

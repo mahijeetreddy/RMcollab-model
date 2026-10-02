@@ -109,6 +109,11 @@ services:
       # Ask the room: how much a keyword match counts against a meaning match
       # (see gateway/src/ask/store.ts for how 0.01 was chosen).
       ASK_KEYWORD_WEIGHT: ${ASK_KEYWORD_WEIGHT:-0.01}
+      # Development only: every e2e test creates sessions and opens sockets
+      # from this one machine's address, hundreds per run. Production keeps
+      # the defaults (30 sessions an hour, 100 connections per address).
+      LIMIT_SESSIONS_PER_HOUR: "100000"
+      LIMIT_CONNECTIONS_PER_ADDRESS: "100000"
     # No host port: `--scale gateway=N` would collide on it. The lb publishes
     # 4000 and spreads traffic across however many replicas are running.
     expose:

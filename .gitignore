@@ -8,6 +8,9 @@ build/
 .env
 .env.*
 
+# Database dumps (infra/backup): never committed.
+backups/
+
 # Python
 __pycache__/
 *.py[cod]

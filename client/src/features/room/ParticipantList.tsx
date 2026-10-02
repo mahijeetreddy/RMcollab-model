@@ -10,11 +10,27 @@ interface Props {
   /** The active room's owner: its creator, or for the main room the session's first person. */
   ownerId: string | null;
   room?: Room | null;
+  /** For handing the session over; only the main room's owner is offered it. */
+  sessionCode?: string | null;
 }
 
-export function ParticipantList({ participants, meId, ownerId, room = null }: Props) {
+export function ParticipantList({ participants, meId, ownerId, room = null, sessionCode = null }: Props) {
   const iOwnIt = Boolean(meId && ownerId && meId === ownerId && room);
   const [confirming, setConfirming] = useState<string | null>(null);
+  const [handingTo, setHandingTo] = useState<string | null>(null);
+  const handOver = async (target: Participant) => {
+    if (!sessionCode || !meId) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.handOverSession(sessionCode, meId, target.id);
+      setHandingTo(null);
+    } catch (cause) {
+      setError(cause instanceof ApiError ? cause.message : `Could not hand the session to ${target.displayName}.`);
+    } finally {
+      setBusy(false);
+    }
+  };
   const [newCode, setNewCode] = useState<{ code: string; name: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -76,12 +92,17 @@ export function ParticipantList({ participants, meId, ownerId, room = null }: Pr
         const target = participants.find((p) => p.id === confirming);
         if (!target) return null;
         return (
-          <div className="room-delete-confirm participant-confirm" role="alertdialog" aria-label={`Remove ${target.displayName}?`}>
+          <div
+            className="room-delete-confirm participant-confirm"
+            role="alertdialog"
+            aria-label={`Remove ${target.displayName}?`}
+            onKeyDown={(event) => event.key === "Escape" && !busy && setConfirming(null)}
+          >
             <p>
               {room.isMain ? (
                 <>
-                  Remove <strong>{target.displayName}</strong> from the session? They are disconnected, and can only come
-                  back with the code as someone new.
+                  Remove <strong>{target.displayName}</strong> from the session? They are disconnected, and the session
+                  gets a new code, so the one they know stops working.
                 </>
               ) : (
                 <>
@@ -91,11 +112,36 @@ export function ParticipantList({ participants, meId, ownerId, room = null }: Pr
               )}
             </p>
             <div className="job-confirm-actions">
-              <button type="button" className="ghost" onClick={() => setConfirming(null)} disabled={busy}>
+              <button type="button" className="ghost" onClick={() => setConfirming(null)} disabled={busy} autoFocus>
                 Cancel
               </button>
-              <button type="button" className="danger" onClick={() => void remove(target)} disabled={busy} autoFocus>
+              <button type="button" className="danger" onClick={() => void remove(target)} disabled={busy}>
                 {busy ? "Removing…" : "Remove"}
+              </button>
+            </div>
+          </div>
+        );
+      })()}
+      {handingTo && room?.isMain && (() => {
+        const target = participants.find((p) => p.id === handingTo);
+        if (!target) return null;
+        return (
+          <div
+            className="room-delete-confirm participant-confirm"
+            role="alertdialog"
+            aria-label={`Make ${target.displayName} the owner?`}
+            onKeyDown={(event) => event.key === "Escape" && !busy && setHandingTo(null)}
+          >
+            <p>
+              Make <strong>{target.displayName}</strong> the session's owner? They get the owner's controls (the waiting
+              room, removing people, ending the session), and you become an ordinary member.
+            </p>
+            <div className="job-confirm-actions">
+              <button type="button" className="ghost" onClick={() => setHandingTo(null)} disabled={busy} autoFocus>
+                Cancel
+              </button>
+              <button type="button" className="primary" onClick={() => void handOver(target)} disabled={busy}>
+                {busy ? "Handing over…" : "Make owner"}
               </button>
             </div>
           </div>
@@ -136,6 +182,16 @@ export function ParticipantList({ participants, meId, ownerId, room = null }: Pr
                   onClick={() => setConfirming(participant.id)}
                 >
                   Remove
+                </button>
+              )}
+              {iOwnIt && room?.isMain && sessionCode && participant.id !== meId && (
+                <button
+                  type="button"
+                  className="ghost participant-remove"
+                  aria-label={`Make ${participant.displayName} the owner`}
+                  onClick={() => setHandingTo(participant.id)}
+                >
+                  Make owner
                 </button>
               )}
               <span

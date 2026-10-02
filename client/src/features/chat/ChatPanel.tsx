@@ -13,6 +13,10 @@ interface Props {
   /** Controlled by the room, which keeps one dock (chat or Ask) open at a time. */
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** An owner of this room or of the session: may delete anyone's message. */
+  canModerate?: boolean;
+  /** Deletes a message; resolves once the gateway has, rejects with why not. */
+  onDelete?: (messageId: string) => Promise<void>;
 }
 
 function typingLabel(names: string[]): string {
@@ -21,7 +25,30 @@ function typingLabel(names: string[]): string {
   return `${names[0]} and ${names.length - 1} others are typing`;
 }
 
-export function ChatPanel({ messages, meId, canSend, onSend, typing, onTyping, open, onOpenChange }: Props) {
+export function ChatPanel({
+  messages,
+  meId,
+  canSend,
+  onSend,
+  typing,
+  onTyping,
+  open,
+  onOpenChange,
+  canModerate = false,
+  onDelete,
+}: Props) {
+  const [deleting, setDeleting] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const confirmDelete = async (messageId: string) => {
+    if (!onDelete) return;
+    setDeleteError(null);
+    try {
+      await onDelete(messageId);
+      setDeleting(null);
+    } catch (cause) {
+      setDeleteError(cause instanceof Error ? cause.message : "Could not delete that message.");
+    }
+  };
   const [draft, setDraft] = useState("");
   const [unread, setUnread] = useState(0);
   const bottomRef = useRef<HTMLDivElement | null>(null);
@@ -177,8 +204,39 @@ export function ChatPanel({ messages, meId, canSend, onSend, typing, onTyping, o
                   <time className="chat-time" dateTime={new Date(message.createdAt).toISOString()}>
                     {formatTime(message.createdAt)}
                   </time>
+                  {onDelete && (message.participantId === meId || canModerate) && deleting !== message.id && (
+                    <button
+                      type="button"
+                      className="chat-delete"
+                      aria-label={`Delete message from ${message.displayName}`}
+                      onClick={() => setDeleting(message.id)}
+                    >
+                      Delete
+                    </button>
+                  )}
                 </div>
                 <p className="chat-body">{message.body}</p>
+                {deleting === message.id && (
+                  <div
+                    className="chat-delete-confirm"
+                    role="alertdialog"
+                    aria-label="Delete this message?"
+                    onKeyDown={(event) => event.key === "Escape" && setDeleting(null)}
+                  >
+                    <span>Delete for everyone?</span>
+                    <button type="button" className="ghost" autoFocus onClick={() => setDeleting(null)}>
+                      Cancel
+                    </button>
+                    <button type="button" className="danger" onClick={() => void confirmDelete(message.id)}>
+                      Delete
+                    </button>
+                  </div>
+                )}
+                {deleting === message.id && deleteError && (
+                  <p className="error-text" role="alert">
+                    {deleteError}
+                  </p>
+                )}
               </article>
             ))}
           </div>

@@ -1,0 +1,49 @@
+# Production front door. DOMAIN is the public host name; Caddy gets and renews
+# its certificate by itself (Let's Encrypt), so ports 80 and 443 must reach it.
+# DOMAIN=localhost serves a locally trusted certificate, for trying this out.
+# No contact email is set: Let's Encrypt does not need one, and would only use
+# it for expiry warnings, which Caddy's automatic renewal makes moot.
+
+{$DOMAIN} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		X-Frame-Options DENY
+		-Server
+	}
+
+	# Everything the gateway answers. Replicas are found by name, as the dev
+	# load balancer does: `--scale gateway=N` adds them with no config change.
+	# Round robin with no stickiness, deliberately - see infra/nginx.conf.
+	@gateway path /api/* /ws /files/* /health
+	handle @gateway {
+		request_body {
+			# The gateway's own limit is 64 MB; this leaves room for form framing.
+			max_size 70MB
+		}
+		reverse_proxy {
+			dynamic a {
+				name gateway
+				port 4000
+				refresh 5s
+			}
+			lb_policy round_robin
+			# Media links and uploads are long; sockets are longer.
+			flush_interval -1
+		}
+	}
+
+	# The app itself: a single page, so any other path is index.html.
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+		# Built assets carry a content hash in their name and never change.
+		@hashed path /assets/*
+		header @hashed Cache-Control "public, max-age=31536000, immutable"
+		header /index.html Cache-Control "no-cache"
+	}
+}

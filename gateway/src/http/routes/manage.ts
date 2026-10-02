@@ -23,7 +23,7 @@ import {
 import { docHub } from "../../docs/hub.js";
 import { checkUpload } from "../../limits.js";
 import { notesWriter } from "../../notes/index.js";
-import { enqueueEnhanceTask } from "../../queue/enqueue.js";
+import { submitJob } from "../../queue/dispatcher.js";
 import { enhancedPath, mediaFolder, roomFolder, storage } from "../../storage/local.js";
 import { pubsub } from "../../ws/pubsub.js";
 import { asyncHandler } from "../asyncHandler.js";
@@ -147,7 +147,7 @@ manageRouter.post(
       params: {},
     };
     try {
-      await enqueueEnhanceTask(payload, routeJob(mediaType, strategy));
+      await submitJob(job.id, payload, routeJob(mediaType, strategy));
     } catch (err) {
       const message = err instanceof Error ? err.message : "enqueue failed";
       const failed = await updateJobFromEvent({

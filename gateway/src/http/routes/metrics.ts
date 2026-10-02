@@ -1,3 +1,4 @@
+import { timingSafeEqual } from "node:crypto";
 import { QUEUES, type MediaType } from "@rmcollab/shared";
 import { Router } from "express";
 import { Redis } from "ioredis";
@@ -61,9 +62,26 @@ async function queueDepths(): Promise<QueueDepth[]> {
 
 export const metricsRouter = Router();
 
+/**
+ * Queue depths and job counts say how busy the service is and when: fine to
+ * show in development (the header's cluster panel), not to the whole internet.
+ * In production it answers only a bearer token, for a monitoring tool.
+ */
+export function metricsAllowed(authorization: string | undefined, c = config): boolean {
+  if (!c.production) return true;
+  if (!c.metricsToken) return false;
+  const given = Buffer.from(authorization?.replace(/^Bearer\s+/i, "") ?? "");
+  const expected = Buffer.from(c.metricsToken);
+  return given.length === expected.length && timingSafeEqual(given, expected);
+}
+
 metricsRouter.get(
   "/api/metrics",
-  asyncHandler(async (_req, res) => {
+  asyncHandler(async (req, res) => {
+    if (!metricsAllowed(req.headers.authorization)) {
+      res.status(404).json({ error: "not_found" });
+      return;
+    }
     const [queues, jobs, stream] = await Promise.all([
       queueDepths(),
       pool.query<{ status: string; count: string }>(

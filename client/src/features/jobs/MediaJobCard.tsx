@@ -74,9 +74,18 @@ interface CardProps extends MediaItemWithJob {
   focus?: DocumentFocus | null;
   /** Who is viewing, for rename, delete and retry; null hides them. */
   manage?: Manage | null;
+  /** While queued: how many jobs are ahead of this one in its worker pool. */
+  ahead?: number;
 }
 
-export function MediaJobCard({ mediaItem, job, focus = null, manage = null }: CardProps) {
+/** Said as a rough count: a pool runs several jobs at once, so the line is not exact. */
+export function waitingWords(ahead: number | undefined): string {
+  if (ahead === undefined) return "Waiting for a worker";
+  if (ahead === 0) return "Next in line";
+  return `${ahead} ahead in the queue`;
+}
+
+export function MediaJobCard({ mediaItem, job, focus = null, manage = null, ahead }: CardProps) {
   const status: JobStatus = job?.status ?? "queued";
   const progress = Math.min(1, Math.max(0, job?.progress ?? 0));
   const percent = Math.round(progress * 100);
@@ -206,7 +215,7 @@ export function MediaJobCard({ mediaItem, job, focus = null, manage = null }: Ca
           />
         </div>
         <div className="progress-meta">
-          <span>{job?.message ?? (status === "queued" ? "Waiting for a worker" : "")}</span>
+          <span>{job?.message ?? (status === "queued" ? waitingWords(ahead) : "")}</span>
           <strong>{status === "failed" ? "—" : `${status === "done" ? 100 : percent}%`}</strong>
         </div>
       </div>

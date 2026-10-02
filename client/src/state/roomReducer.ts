@@ -21,6 +21,13 @@ export interface RoomState {
   activeRoomId: string | null;
   /** False between asking to join a room and its `room_state` snapshot arriving. */
   synced: boolean;
+  /**
+   * The room whose snapshot is on screen. Unlike `synced`, kept through a
+   * reconnect: the room stays up while the socket comes back, so the notes
+   * editor keeps its document - and any edits not yet sent, which the resync
+   * then delivers. Taking the view down on every blip destroyed them.
+   */
+  loadedRoomId: string | null;
   participants: Participant[];
   chat: ChatMessage[];
   media: MediaItemWithJob[];
@@ -30,6 +37,10 @@ export interface RoomState {
   lastError: RealtimeError | null;
   /** Waiting room: set while this browser waits to be let in, or once it was turned away. */
   admission: { status: "waiting"; sessionName: string | null; ownerName: string | null } | { status: "denied"; byName: string } | null;
+  /** Set when the session's owner ended it: everything in it is being deleted. */
+  ended: { byName: string; at: number } | null;
+  /** The latest handover of the session, for telling people who owns it now. */
+  ownerChange: { ownerId: string; ownerName: string; byName: string; at: number } | null;
   /** For the owner: who is waiting, and whose request has been answered. */
   waitingList: { id: string; displayName: string }[];
   admissionDecided: string[];
@@ -45,12 +56,15 @@ export const initialRoomState: RoomState = {
   rooms: [],
   activeRoomId: null,
   synced: false,
+  loadedRoomId: null,
   participants: [],
   chat: [],
   media: [],
   typing: {},
   lastError: null,
   admission: null,
+  ended: null,
+  ownerChange: null,
   waitingList: [],
   admissionDecided: [],
   documents: null,
@@ -125,6 +139,7 @@ function applyServerEvent(state: RoomState, event: ServerEvent): RoomState {
         ...state,
         activeRoomId: event.roomId,
         synced: true,
+        loadedRoomId: event.roomId,
         // Entering successfully resolves whatever refused the previous attempt
         // (a missing or wrong room code), so the prompt must not linger.
         lastError: null,
@@ -171,6 +186,19 @@ function applyServerEvent(state: RoomState, event: ServerEvent): RoomState {
         waitingList: state.waitingList.filter((p) => p.id !== event.participantId),
         admissionDecided: [...state.admissionDecided, event.participantId],
       };
+
+    case "session_ended":
+      return { ...state, ended: { byName: event.byName, at: Date.now() } };
+
+    case "owner_changed":
+      return {
+        ...state,
+        ownerChange: { ownerId: event.ownerId, ownerName: event.ownerName, byName: event.byName, at: Date.now() },
+      };
+
+    case "chat_message_deleted":
+      if (!isCurrentRoom(state, event.roomId)) return state;
+      return { ...state, chat: state.chat.filter((m) => m.id !== event.messageId) };
 
     case "admission_withdrawn":
       return {
@@ -251,7 +279,7 @@ function applyServerEvent(state: RoomState, event: ServerEvent): RoomState {
       // The room list update that follows moves anyone inside to the main room
       // (RoomView); nothing of the gone room is worth keeping in the meantime.
       if (!isCurrentRoom(state, event.roomId)) return state;
-      return { ...state, media: [], chat: [], synced: false };
+      return { ...state, media: [], chat: [], synced: false, loadedRoomId: null };
 
     case "job_status_update": {
       if (!isCurrentRoom(state, event.roomId)) return state;
@@ -338,6 +366,8 @@ export function roomReducer(state: RoomState, action: RoomAction): RoomState {
         ...state,
         activeRoomId: action.roomId,
         synced: false,
+        // Another room: this one's view goes. The same room (a rejoin) stays up.
+        loadedRoomId: state.loadedRoomId === action.roomId ? state.loadedRoomId : null,
         participants: [],
         chat: [],
         media: [],

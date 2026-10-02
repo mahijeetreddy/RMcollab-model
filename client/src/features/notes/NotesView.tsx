@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { formatSessionCode, type MediaItemWithJob, type RoomDocument } from "@rmcollab/shared";
+import { inviteUrl } from "../../lib/invite";
+import { type MediaItemWithJob, type RoomDocument } from "@rmcollab/shared";
 import { MAIN_DOC_ID, NOTES_FIELD } from "@rmcollab/shared/notes";
 import Collaboration from "@tiptap/extension-collaboration";
 import CollaborationCaret from "@tiptap/extension-collaboration-caret";
@@ -363,15 +364,15 @@ function ShareButton({ sessionCode, roomName }: { sessionCode: string; roomName:
   }, [copied]);
   const share = async () => {
     try {
-      await navigator.clipboard.writeText(`Join "${roomName}" on RMcollab with session code ${formatSessionCode(sessionCode)}`);
+      await navigator.clipboard.writeText(`Join "${roomName}" on RMcollab: ${inviteUrl(sessionCode)}`);
       setCopied(true);
     } catch {
-      window.prompt("Copy this session code to invite people:", formatSessionCode(sessionCode));
+      window.prompt("Copy this link to invite people:", inviteUrl(sessionCode));
     }
   };
   return (
     <button type="button" className="gdoc-share" onClick={share} aria-live="polite">
-      {copied ? "Code copied" : "Share"}
+      {copied ? "Invite link copied" : "Share"}
     </button>
   );
 }

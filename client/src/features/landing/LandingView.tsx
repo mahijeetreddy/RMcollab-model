@@ -1,10 +1,12 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
+import { clearInvite, readInvite, type Invite } from "../../lib/invite";
 import { formatSessionCode, normalizeSessionCode, type Session } from "@rmcollab/shared";
 import { api, ApiError } from "../../api/client";
 import { ThemeToggle } from "../../theme/ThemeToggle";
 import type { ThemeApi } from "../../theme/useTheme";
 import type { Credentials } from "../../ws/useRealtime";
 import { forgetSession, loadRecent, visitedAgo, type RecentSession } from "../../lib/recent";
+import { errorTracking } from "../../lib/errorTracking";
 import { docIcons, icons } from "../notes/icons";
 
 interface Props {
@@ -32,8 +34,15 @@ export function LandingView({ onEnter, theme, notice = null }: Props) {
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
 
-  const [joinCode, setJoinCode] = useState("");
+  // Opened from an invite link (/join/CODE), or a "use on another device"
+  // link that also carries who to continue as. Read once, on arrival.
+  const [invite] = useState<Invite | null>(() => readInvite());
+  const [joinCode, setJoinCode] = useState(invite?.code ?? "");
   const [displayName, setDisplayName] = useState("");
+  const nameRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    if (invite) nameRef.current?.focus();
+  }, [invite]);
   const [joining, setJoining] = useState(false);
   const [joinError, setJoinError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -76,9 +85,12 @@ export function LandingView({ onEnter, theme, notice = null }: Props) {
 
     setJoining(true);
     setJoinError(null);
+    // Continuing as someone (a private device link) only for the session it was made for.
+    const as = invite?.participantId && invite.code === code ? invite.participantId : undefined;
     try {
-      const session = await api.getSession(code);
-      onEnter({ sessionCode: session.code, displayName: name });
+      const session = await api.getSession(code, as);
+      clearInvite();
+      onEnter({ sessionCode: session.code, displayName: name, ...(as ? { participantId: as } : {}) });
     } catch (error) {
       setJoinError(
         error instanceof ApiError && error.status === 404
@@ -127,6 +139,13 @@ export function LandingView({ onEnter, theme, notice = null }: Props) {
         {notice && (
           <p className="landing-notice" role="status">
             {notice}
+          </p>
+        )}
+        {invite && !notice && (
+          <p className="landing-notice landing-invite" role="status">
+            {invite.participantId
+              ? "This link continues as someone already in a session, on this device. Enter your name below to go in."
+              : "You've been invited to a session. Enter your name below to join."}
           </p>
         )}
         <div className="landing-hero">
@@ -237,6 +256,7 @@ export function LandingView({ onEnter, theme, notice = null }: Props) {
               <label htmlFor="display-name">Display name</label>
               <input
                 id="display-name"
+                ref={nameRef}
                 value={displayName}
                 onChange={(event) => setDisplayName(event.target.value)}
                 placeholder="Ada"
@@ -280,8 +300,13 @@ export function LandingView({ onEnter, theme, notice = null }: Props) {
         </ul>
 
         <p className="landing-fineprint">
-          Sessions, with everything in them, are deleted after 3 days without activity. Uploads are analysed by
-          third-party AI models (Groq and Google Gemini), so don't add anything confidential.
+          Sessions, with everything in them, are deleted after 3 days without activity, or 30 if whoever started
+          one chooses to keep it. Uploads are analysed by
+          third-party AI models (Groq and Google Gemini), so don't add anything confidential. There are no accounts:
+          you are known only by the name you type, and this browser remembers the sessions you joined.
+          {errorTracking &&
+            " If something breaks, an error report goes to Sentry - where it broke, never what anyone wrote or their names."}{" "}
+          <a href="/privacy">How your data is handled</a>
         </p>
       </main>
     </div>
@@ -405,7 +430,7 @@ function RecentSessions({ onEnter }: { onEnter: (credentials: Credentials) => vo
       </ul>
       {gone && (
         <p className="recent-gone" role="status">
-          {gone} has ended - sessions are deleted after 3 days without activity.
+          {gone} has ended - sessions are deleted after a while without activity.
         </p>
       )}
     </section>

@@ -259,3 +259,16 @@ CREATE TABLE IF NOT EXISTS retired_session_codes (
 -- A waiting room: when on, someone new waits until the owner lets them in.
 ALTER TABLE sessions ADD COLUMN IF NOT EXISTS waiting_room BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE participants ADD COLUMN IF NOT EXISTS waiting BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- Fair queueing (gateway/src/queue/dispatcher.ts): a job waits here, with what
+-- it needs to be sent, until the dispatcher hands it to its worker pool. Jobs
+-- queued before this existed have no payload; they were already sent.
+ALTER TABLE enhancement_jobs ADD COLUMN IF NOT EXISTS queue TEXT;
+ALTER TABLE enhancement_jobs ADD COLUMN IF NOT EXISTS payload JSONB;
+ALTER TABLE enhancement_jobs ADD COLUMN IF NOT EXISTS dispatched_at BIGINT;
+CREATE INDEX IF NOT EXISTS enhancement_jobs_waiting_idx
+  ON enhancement_jobs(queue, created_at) WHERE status = 'queued' AND dispatched_at IS NULL;
+
+-- "Keep for 30 days": the owner's choice to keep a session through longer
+-- quiet spells - a group that meets weekly would otherwise lose it in between.
+ALTER TABLE sessions ADD COLUMN IF NOT EXISTS kept BOOLEAN NOT NULL DEFAULT FALSE;

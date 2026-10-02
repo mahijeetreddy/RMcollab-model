@@ -16,6 +16,7 @@
     "check:contracts": "node scripts/check-contracts.mjs",
     "scale": "docker compose -f infra/docker-compose.yml up -d --scale gateway=2 --scale text-worker=3",
     "loadtest": "node scripts/loadtest.mjs",
+    "smoke": "node scripts/smoke.mjs",
     "test": "npm run test:gateway && npm run test:client && npm run check:contracts",
     "test:gateway": "npm test -w gateway",
     "test:client": "npm test -w client",

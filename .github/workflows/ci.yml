@@ -41,6 +41,53 @@ jobs:
       - name: Client production build
         run: npm run build -w client
 
+  deploy-config:
+    name: Deploy config - compose files and Caddyfile parse
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Placeholder secrets, only so interpolation succeeds: this checks that
+      # the production override still merges cleanly, not what it deploys.
+      - name: Production compose merges
+        env:
+          DOMAIN: ci.example
+          FILE_SIGNING_SECRET: ci-placeholder-not-a-secret-0000000000000000
+          POSTGRES_PASSWORD: ci-placeholder
+          REDIS_PASSWORD: ci-placeholder
+        run: |
+          docker compose -f infra/docker-compose.yml -f infra/docker-compose.prod.yml config --quiet
+          docker compose -f infra/docker-compose.yml -f infra/docker-compose.prod.yml -f infra/docker-compose.gpu.yml config --quiet
+
+      - name: Caddyfile is valid
+        run: docker run --rm -e DOMAIN=ci.example -v "$PWD/infra/web/Caddyfile:/etc/caddy/Caddyfile:ro" caddy:2-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+
+  # The production host is an ARM machine (Oracle's free Ampere VMs). Building
+  # these under emulation took hours; a native ARM runner builds them in
+  # minutes, and catches a dependency that stops shipping ARM wheels before a
+  # deploy does.
+  arm64-images:
+    name: ARM - every production image builds and imports
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the production images
+        run: |
+          docker build -f gateway/Dockerfile -t rmcollab-gateway .
+          docker build -f infra/web/Dockerfile -t rmcollab-web .
+          docker build -f workers/Dockerfile -t rmcollab-worker .
+          docker build -f workers/Dockerfile.ml -t rmcollab-worker-ml .
+          docker build -t rmcollab-postgres infra/postgres
+
+      - name: The ML worker loads its stack, on CPU
+        run: >
+          docker run --rm rmcollab-worker-ml python -c
+          "import workers.strategies.audio.deepfilternet as dfn; dfn._stub_torchaudio();
+          import torch, cv2, faster_whisper, ctranslate2, df, noisereduce;
+          assert not torch.cuda.is_available();
+          print('torch', torch.__version__, 'ctranslate2', ctranslate2.__version__)"
+
   python:
     name: Python - worker unit tests
     runs-on: ubuntu-latest

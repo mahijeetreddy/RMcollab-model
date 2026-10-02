@@ -4326,3 +4326,69 @@ button.doc-card-open:hover:not(:disabled) { border-color: var(--accent-line); bo
 @media (prefers-reduced-motion: reduce) {
   .waiting-pulse, .admission { animation: none; }
 }
+
+/* ==========================================================================
+   Invite links, chat moderation, ending a session, privacy page
+   ========================================================================== */
+.invite { position: relative; display: inline-flex; }
+button.invite-toggle { cursor: pointer; line-height: 1.5; }
+button.invite-toggle:hover { border-color: var(--accent); }
+button.invite-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.invite-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 60;
+  width: min(340px, calc(100vw - 32px));
+  display: grid;
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-lg);
+  animation: add-in 0.16s ease-out;
+}
+.invite-block { display: grid; gap: 6px; justify-items: start; }
+.invite-block + .invite-block { padding-top: 12px; border-top: 1px solid var(--border); }
+.invite-title { margin: 0; font-size: 13.5px; font-weight: 650; color: var(--text); }
+.invite-detail { margin: 0 0 4px; font-size: 12.5px; line-height: 1.5; color: var(--text-dim); }
+.landing-invite { border-color: var(--accent-line); background: var(--accent-soft); color: var(--text); }
+
+.chat-delete {
+  margin-left: auto;
+  padding: 0 6px;
+  border: 0;
+  background: none;
+  font-size: 11px;
+  color: var(--text-faint);
+  opacity: 0;
+  cursor: pointer;
+}
+.chat-msg:hover .chat-delete, .chat-delete:focus-visible { opacity: 1; }
+.chat-delete:hover { color: var(--bad); }
+@media (hover: none) { .chat-delete { opacity: 1; } }
+.chat-delete-confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; font-size: 12.5px; color: var(--text-dim); }
+.chat-delete-confirm button { padding: 3px 10px; font-size: 12px; }
+
+.end-session { margin: 8px 0 4px; }
+button.end-session-button { width: 100%; justify-content: center; color: var(--bad); border-color: color-mix(in srgb, var(--bad) 35%, var(--border)); }
+button.end-session-button:hover:not(:disabled) { background: color-mix(in srgb, var(--bad) 8%, transparent); }
+.end-session-confirm { display: grid; gap: 10px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--bad) 40%, var(--border)); border-radius: 10px; background: color-mix(in srgb, var(--bad) 6%, var(--bg-raised)); }
+.end-session-confirm p { margin: 0; font-size: 13px; line-height: 1.5; color: var(--text); }
+
+.privacy { min-height: 100vh; background: var(--bg); color: var(--text); }
+.privacy-main { max-width: 68ch; margin: 0 auto; padding: 32px 16px 64px; font-size: 15.5px; line-height: 1.65; }
+.privacy-main h1 { margin: 12px 0 8px; font-size: 32px; letter-spacing: -0.02em; }
+.privacy-main h2 { margin: 32px 0 6px; font-size: 18px; letter-spacing: -0.01em; }
+.privacy-main p, .privacy-main li { color: var(--text-dim); }
+.privacy-main strong { color: var(--text); }
+.privacy-main ul { padding-left: 1.2em; }
+.privacy-main li + li { margin-top: 4px; }
+.privacy-lead { font-size: 17px; color: var(--text) !important; }
+.privacy-back { font-size: 14px; color: var(--accent-text); text-decoration: none; }
+.privacy-back:hover { text-decoration: underline; }
+.landing-fineprint a { color: var(--accent-text); }
+@media (prefers-reduced-motion: reduce) { .invite-menu { animation: none; } }
+
+.retention-note { margin: 10px 0 2px; font-size: 12px; color: var(--text-faint); }

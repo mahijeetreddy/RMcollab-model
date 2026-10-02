@@ -25,6 +25,7 @@
 
 # Runtime data, not source. storage/ holds users' uploaded recordings and images.
 storage
+backups
 models
 *.pth
 *.onnx

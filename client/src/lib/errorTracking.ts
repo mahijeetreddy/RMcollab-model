@@ -11,6 +11,9 @@ import { scrubEvent } from "@rmcollab/shared";
 
 const dsn = import.meta.env.VITE_SENTRY_DSN?.trim();
 
+/** Whether reports are sent at all, for saying so where it matters. */
+export const errorTracking = Boolean(dsn);
+
 export function startErrorTracking(): void {
   if (!dsn) return;
   Sentry.init({

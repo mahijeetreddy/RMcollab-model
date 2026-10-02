@@ -23,10 +23,25 @@ log = logging.getLogger(__name__)
 # with the image and video pools, so a float16 `small` alongside Real-ESRGAN's
 # ~756MB working set is asking for a CUDA OOM on a busy room.
 DEFAULT_MODEL = "small"
+# Without a GPU, `base`: measured on 4 CPU cores (workers/tools/cpu_bench.py),
+# `small` ran at 2.7x real time - a one-hour lecture in nearly three - and `base`
+# at 1.4x, with the same words to within one on the test lecture. WHISPER_MODEL
+# overrides either.
+DEFAULT_MODEL_CPU = "base"
 DEFAULT_COMPUTE_CUDA = "int8_float16"
 DEFAULT_COMPUTE_CPU = "int8"
 
 MAX_DURATION_S = 3 * 60 * 60
+
+
+def default_model() -> str:
+    """`small` on a GPU, `base` without one (see DEFAULT_MODEL_CPU)."""
+    try:
+        import ctranslate2
+
+        return DEFAULT_MODEL if ctranslate2.get_cuda_device_count() > 0 else DEFAULT_MODEL_CPU
+    except Exception:
+        return DEFAULT_MODEL_CPU
 
 
 class TranscriptionUnavailable(RuntimeError):
@@ -102,7 +117,7 @@ def transcribe_file(
             f"{MAX_DURATION_S // 3600} hour limit"
         )
 
-    size = str(params.get("model") or os.getenv("WHISPER_MODEL") or DEFAULT_MODEL)
+    size = str(params.get("model") or os.getenv("WHISPER_MODEL") or default_model())
     step(0.04, f"loading Whisper {size}")
     model, device, compute = _load_model(size, params.get("device"))
 

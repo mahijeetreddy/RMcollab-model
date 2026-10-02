@@ -62,7 +62,9 @@ export const isSession: Guard<Session> = (value): value is Session =>
   isString(value["code"]) &&
   isNullableString(value["name"]) &&
   isNumber(value["createdAt"]) &&
-  optional(isBoolean)(value["waitingRoom"]);
+  optional(isBoolean)(value["waitingRoom"]) &&
+  optional(isBoolean)(value["kept"]) &&
+  optional(isNumber)(value["retentionDays"]);
 
 export const isRoom: Guard<Room> = (value): value is Room =>
   isRecord(value) &&
@@ -228,6 +230,14 @@ const eventGuards: { [K in ServerEvent["type"]]: (event: Fields) => boolean } = 
     isString(e["sessionId"]) && isString(e["participantId"]) && isBoolean(e["admitted"]) && isString(e["byName"]),
 
   admission_withdrawn: (e) => isString(e["sessionId"]) && isString(e["participantId"]),
+
+  session_ended: (e) =>
+    isString(e["sessionId"]) && isString(e["byName"]) && Array.isArray(e["roomIds"]) && e["roomIds"].every(isString),
+
+  owner_changed: (e) =>
+    isString(e["sessionId"]) && isString(e["ownerId"]) && isString(e["ownerName"]) && isString(e["byName"]),
+
+  chat_message_deleted: (e) => isString(e["roomId"]) && isString(e["messageId"]),
 
   participant_removed: (e) =>
     isString(e["roomId"]) &&

@@ -5,9 +5,10 @@ import { RoomView } from "./features/room/RoomView";
 import { ConnectionIndicator } from "./features/room/ConnectionIndicator";
 import { ThemeToggle } from "./theme/ThemeToggle";
 import { useTheme } from "./theme/useTheme";
-import { formatSessionCode } from "@rmcollab/shared";
 import { forgetSession, rememberSession } from "./lib/recent";
 import { WaitingScreen } from "./features/room/Admission";
+import { InviteMenu } from "./features/room/InviteMenu";
+import { PrivacyPage } from "./features/landing/PrivacyPage";
 import { useRealtime, type Credentials } from "./ws/useRealtime";
 
 const STORAGE_KEY = "rmcollab.credentials";
@@ -37,6 +38,12 @@ function loadCredentials(): Credentials | null {
 }
 
 export default function App() {
+  // The privacy page stands alone: readable without joining anything.
+  if (window.location.pathname === "/privacy") return <PrivacyPage />;
+  return <SessionApp />;
+}
+
+function SessionApp() {
   const [credentials, setCredentials] = useState<Credentials | null>(loadCredentials);
   const theme = useTheme();
 
@@ -72,6 +79,14 @@ export default function App() {
   const [landingNotice, setLandingNotice] = useState<string | null>(null);
   const removedFromSession = realtime.state.removed?.scope === "session" ? realtime.state.removed : null;
   const turnedAway = realtime.state.admission?.status === "denied" ? realtime.state.admission : null;
+  const ended = realtime.state.ended;
+  useEffect(() => {
+    if (!ended || !stable) return;
+    forgetSession(stable.sessionCode, realtime.state.me?.id);
+    setLandingNotice(`${ended.byName} ended the session. Everything in it has been deleted.`);
+    setCredentials(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ended?.at]);
   useEffect(() => {
     if (!turnedAway || !stable) return;
     forgetSession(stable.sessionCode, realtime.state.me?.id);
@@ -143,14 +158,15 @@ export default function App() {
 
         <div className="header-meta">
           <span id="session-code-label">Session</span>
-          <span className="code-chip" aria-labelledby="session-code-label">
-            {formatSessionCode(state.session?.code ?? stable.sessionCode)}
-          </span>
+          <InviteMenu code={state.session?.code ?? stable.sessionCode} participantId={state.me?.id ?? null} />
         </div>
 
         <span className="header-spacer" />
 
-        <ClusterPanel />
+        {/* A view of the cluster's queues for developing and demonstrating the
+            scale-out; production builds leave it out (and the gateway refuses
+            /api/metrics there without a token). */}
+        {import.meta.env.DEV && <ClusterPanel />}
         <span className="header-divider" aria-hidden="true" />
 
         <ThemeToggle theme={theme} />

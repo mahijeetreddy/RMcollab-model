@@ -75,6 +75,13 @@ export type ServerEvent =
   | { type: "admission_requested"; sessionId: string; participant: { id: string; displayName: string } }
   // Decided: let in, or turned away.
   | { type: "admission_decided"; sessionId: string; participantId: string; admitted: boolean; byName: string }
+  // The owner ended the session: everything in it is being deleted. `roomIds`
+  // is for the gateway replicas (to release those rooms' notes unsaved).
+  | { type: "session_ended"; sessionId: string; byName: string; roomIds: string[] }
+  // The session has a new owner, handed over by the previous one.
+  | { type: "owner_changed"; sessionId: string; ownerId: string; ownerName: string; byName: string }
+  // A chat message was deleted, by whoever wrote it or by an owner.
+  | { type: "chat_message_deleted"; roomId: string; messageId: string }
   // Someone waiting gave up (closed the page, pressed Cancel): off the owner's list.
   | { type: "admission_withdrawn"; sessionId: string; participantId: string }
   // Someone was removed by the room's owner: from a breakout room ("room"),

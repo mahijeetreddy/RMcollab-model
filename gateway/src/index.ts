@@ -3,7 +3,7 @@ import { flushErrors } from "./instrument.js";
 import http from "node:http";
 import { Redis } from "ioredis";
 import express, { type NextFunction, type Request, type Response } from "express";
-import { config } from "./config.js";
+import { config, productionProblems } from "./config.js";
 import { migrate } from "./db/migrate.js";
 import { backfillArtifactBodies } from "./db/repositories.js";
 import { docHub } from "./docs/hub.js";
@@ -24,22 +24,37 @@ import { backfillPassages, embeddingConsumer } from "./ask/indexer.js";
 import { closeAsk } from "./ask/service.js";
 import { jobEventConsumer } from "./jobs/eventConsumer.js";
 import { startLifecycle, stopLifecycle } from "./lifecycle.js";
+import { startDispatcher, stopDispatcher } from "./queue/dispatcher.js";
 import { closeLimits } from "./limits.js";
 import { manageRouter } from "./http/routes/manage.js";
 import { versionsRouter } from "./http/routes/versions.js";
 import { documentsRouter } from "./http/routes/documents.js";
+import { queueRouter } from "./http/routes/queue.js";
 import { closeWebhookQueue } from "./webhooks/queue.js";
 import { pubsub } from "./ws/pubsub.js";
 import { createWebSocketServer } from "./ws/server.js";
 
-function cors(_req: Request, res: Response, next: NextFunction): void {
-  res.setHeader("Access-Control-Allow-Origin", "*");
+function cors(req: Request, res: Response, next: NextFunction): void {
+  const origins = config.allowedOrigins;
+  if (origins.includes("*")) {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+  } else {
+    // Named origins: echo the caller's when it is one of them, and nothing
+    // otherwise - the browser then refuses the response to any other site.
+    const origin = req.headers.origin;
+    if (origin && origins.includes(origin)) res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+  }
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   next();
 }
 
 async function main(): Promise<void> {
+  const problems = productionProblems();
+  if (problems.length > 0) {
+    throw new Error(`refusing to start in production:\n  - ${problems.join("\n  - ")}`);
+  }
   await migrate();
   // Off the boot path: indexing old documents must not delay taking traffic.
   // Then split them for Ask the room: bodies first, since passages are made from them.
@@ -75,12 +90,24 @@ async function main(): Promise<void> {
   app.use(manageRouter);
   app.use(versionsRouter);
   app.use(documentsRouter);
+  app.use(queueRouter);
   app.use(libraryRouter);
   app.use(webhooksRouter);
   app.use(filesRouter);
 
   app.use((_req, res) => res.status(404).json({ error: "not_found" }));
   app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+    // An upload past the size limit that did not say its size up front (see
+    // media.ts): the person's mistake, not the gateway's.
+    if ((err as { code?: unknown }).code === "LIMIT_FILE_SIZE") {
+      if (!res.headersSent) {
+        res.status(413).json({
+          error: "file_too_large",
+          message: `Files can be up to ${Math.round(config.maxUploadBytes / (1024 * 1024))} MB.`,
+        });
+      }
+      return;
+    }
     console.error("[http] unhandled", err);
     const message = err instanceof Error ? err.message : "unexpected error";
     if (!res.headersSent) res.status(500).json({ error: "internal_error", message });
@@ -91,6 +118,7 @@ async function main(): Promise<void> {
   await jobEventConsumer.start();
   await embeddingConsumer.start();
   startLifecycle();
+  startDispatcher();
   startStrategyRefresh();
 
   await new Promise<void>((resolve) => server.listen(config.port, resolve));
@@ -110,6 +138,7 @@ async function main(): Promise<void> {
     await embeddingConsumer.stop();
     await closeAsk();
     stopLifecycle();
+    await stopDispatcher();
     await closeLimits();
     // Unsaved note edits (at most one batch window's worth) go to Postgres
     // before the pool closes.

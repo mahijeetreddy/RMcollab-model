@@ -171,4 +171,65 @@ test.describe("expiry", () => {
     compose("exec", "-T", "gateway", "node", "--input-type=module", "-e", "const { sweep } = await import('./dist/lifecycle.js'); await sweep();");
     expect(sql(`SELECT count(*) FROM sessions WHERE id = '${session.id}'`)).toBe("1");
   });
+
+  test("a session its owner chose to keep lasts 30 quiet days, not 3", async () => {
+    const { session } = await createSession("kept");
+    const owner = await Participant.join(session.code, "Owner");
+    const member = await Participant.join(session.code, "Member");
+    // Only the owner may choose; the choice is the session's, for everyone to see.
+    expect((await status(`/api/sessions/${session.code}`, patch({ participantId: member.id, kept: true }))).status).toBe(403);
+    const kept = await status(`/api/sessions/${session.code}`, patch({ participantId: owner.id, kept: true }));
+    expect(kept.status).toBe(200);
+    expect((kept.body.session as { kept: boolean; retentionDays: number })).toMatchObject({ kept: true, retentionDays: 30 });
+    await member.waitFor((e) => e.type === "session_updated" && (e.session as { kept: boolean }).kept);
+    owner.close();
+    member.close();
+    await expect.poll(() => sql(`SELECT count(*) FROM participants WHERE session_id = '${session.id}' AND connected`)).toBe("0");
+
+    const sweep = () =>
+      compose("exec", "-T", "gateway", "node", "--input-type=module", "-e", "const { sweep } = await import('./dist/lifecycle.js'); await sweep();");
+    const idleFor = (days: number) => sql(`UPDATE sessions SET last_active_at = ${Date.now() - days * 24 * 3600 * 1000} WHERE id = '${session.id}'`);
+    idleFor(4);
+    sweep();
+    expect(sql(`SELECT count(*) FROM sessions WHERE id = '${session.id}'`)).toBe("1");
+    idleFor(31);
+    sweep();
+    expect(sql(`SELECT count(*) FROM sessions WHERE id = '${session.id}'`)).toBe("0");
+  });
+});
+
+test.describe("fair queueing", () => {
+  test("a session's backlog does not hold up another session's job", async () => {
+    test.setTimeout(150_000);
+    // With the text pool stopped, jobs pile up: session A drops in four, then
+    // B one. In arrival order B would wait behind all four; taking turns, it
+    // goes to the pool before A's third.
+    compose("stop", "text-worker");
+    try {
+      const a = await createSession("fair-a");
+      const b = await createSession("fair-b");
+      const alice = await Participant.join(a.session.code, "Alice");
+      const bob = await Participant.join(b.session.code, "Bob");
+      const aJobs: string[] = [];
+      for (let i = 1; i <= 4; i += 1) aJobs.push((await uploadText(a.rooms[0]!.id, alice.id, `lecture ${i} notes`, "rulebased")).job.id);
+      const bJob = (await uploadText(b.rooms[0]!.id, bob.id, "our only upload", "rulebased")).job.id;
+
+      compose("start", "text-worker");
+      // Done in the order the pool was handed them; read that order back.
+      await expect
+        .poll(() => sql(`SELECT count(*) FROM enhancement_jobs WHERE id IN ('${[...aJobs, bJob].join("','")}') AND status = 'done'`), {
+          timeout: 120_000,
+        })
+        .toBe("5");
+      const order = sql(
+        `SELECT id FROM enhancement_jobs WHERE id IN ('${[...aJobs, bJob].join("','")}') ORDER BY dispatched_at, created_at`,
+      ).split("\n");
+      // A's first ones may have gone before B arrived; B's goes before A's third.
+      expect(order.indexOf(bJob)).toBeLessThan(order.indexOf(aJobs[2]!));
+      alice.close();
+      bob.close();
+    } finally {
+      compose("start", "text-worker");
+    }
+  });
 });

@@ -23,6 +23,7 @@ import { LIBRARY_MATCH_END, LIBRARY_MATCH_START,
 } from "@rmcollab/shared";
 import { customAlphabet, nanoid } from "nanoid";
 import { storage } from "../storage/local.js";
+import { config } from "../config.js";
 import { pool } from "./pool.js";
 
 // Ambiguity-free alphabet: join codes get read aloud and retyped.
@@ -34,6 +35,7 @@ interface SessionRow {
   name: string | null;
   created_at: number;
   waiting_room: boolean;
+  kept: boolean;
 }
 
 interface RoomRow {
@@ -112,6 +114,8 @@ const toSession = (row: SessionRow): Session => ({
   name: row.name,
   createdAt: row.created_at,
   waitingRoom: Boolean(row.waiting_room),
+  kept: Boolean(row.kept),
+  retentionDays: Math.round((row.kept ? config.sessionKeepMs : config.sessionTtlMs) / 86_400_000),
 });
 
 // access_code is never selected into RoomRow: a room's code must not be able to
@@ -285,7 +289,7 @@ export async function createSession(name: string | null): Promise<Session> {
       `INSERT INTO sessions (id, code, name, created_at)
        VALUES ($1, $2, $3, $4)
        ON CONFLICT (code) DO NOTHING
-       RETURNING id, code, name, created_at, waiting_room`,
+       RETURNING id, code, name, created_at, waiting_room, kept`,
       [nanoid(16), code, name, now],
     );
     const row = rows[0];
@@ -302,13 +306,13 @@ export async function createSession(name: string | null): Promise<Session> {
 export async function getSessionByCode(code: string, participantId?: string): Promise<Session | null> {
   const normalized = normalizeSessionCode(code);
   const { rows } = await pool.query<SessionRow>(
-    `SELECT id, code, name, created_at, waiting_room FROM sessions WHERE code = $1`,
+    `SELECT id, code, name, created_at, waiting_room, kept FROM sessions WHERE code = $1`,
     [normalized],
   );
   if (rows[0]) return toSession(rows[0]);
   if (!participantId) return null;
   const { rows: retired } = await pool.query<SessionRow>(
-    `SELECT s.id, s.code, s.name, s.created_at, s.waiting_room
+    `SELECT s.id, s.code, s.name, s.created_at, s.waiting_room, s.kept
      FROM retired_session_codes r
      JOIN sessions s ON s.id = r.session_id
      JOIN participants p ON p.session_id = s.id AND p.id = $2 AND p.removed_at IS NULL AND NOT p.waiting
@@ -320,7 +324,7 @@ export async function getSessionByCode(code: string, participantId?: string): Pr
 
 export async function getSessionById(id: string): Promise<Session | null> {
   const { rows } = await pool.query<SessionRow>(
-    `SELECT id, code, name, created_at, waiting_room FROM sessions WHERE id = $1`,
+    `SELECT id, code, name, created_at, waiting_room, kept FROM sessions WHERE id = $1`,
     [id],
   );
   const row = rows[0];
@@ -641,14 +645,19 @@ export async function touchSession(sessionId: string): Promise<void> {
 }
 
 /** Sessions idle since before `cutoff` with nobody connected, and their rooms. */
-export async function idleSessions(cutoff: number, limit = 50): Promise<{ id: string; roomIds: string[] }[]> {
+/** Sessions idle past their cutoff: `cutoff` for most, `keptCutoff` for those their owner chose to keep. */
+export async function idleSessions(
+  cutoff: number,
+  keptCutoff: number,
+  limit = 50,
+): Promise<{ id: string; roomIds: string[] }[]> {
   const { rows } = await pool.query<{ id: string; room_ids: string[] | null }>(
     `SELECT s.id, array_remove(array_agg(r.id), NULL) AS room_ids
      FROM sessions s LEFT JOIN rooms r ON r.session_id = s.id
-     WHERE coalesce(s.last_active_at, s.created_at) < $1
+     WHERE coalesce(s.last_active_at, s.created_at) < CASE WHEN s.kept THEN $2::bigint ELSE $1::bigint END
      GROUP BY s.id
-     LIMIT $2`,
-    [cutoff, limit],
+     LIMIT $3`,
+    [cutoff, keptCutoff, limit],
   );
   return rows.map((row) => ({ id: row.id, roomIds: row.room_ids ?? [] }));
 }
@@ -1052,6 +1061,15 @@ export async function listWebhookDeliveries(
  * Clones a delivery's payload into a fresh row so the failed attempt history
  * stays readable next to the replay.
  */
+/** The session a delivery belongs to, through its endpoint: for checking who may replay it. */
+export async function webhookDeliverySessionId(deliveryId: string): Promise<string | null> {
+  const { rows } = await pool.query<{ session_id: string }>(
+    `SELECT e.session_id FROM webhook_deliveries d JOIN webhook_endpoints e ON e.id = d.endpoint_id WHERE d.id = $1`,
+    [deliveryId],
+  );
+  return rows[0]?.session_id ?? null;
+}
+
 export async function replayWebhookDelivery(id: string): Promise<WebhookDelivery | null> {
   const { rows } = await pool.query<WebhookDeliveryRow>(
     `INSERT INTO webhook_deliveries
@@ -1244,7 +1262,7 @@ export async function rotateSessionCode(sessionId: string): Promise<Session | nu
        )
        UPDATE sessions SET code = $2 WHERE id = $1
          AND NOT EXISTS (SELECT 1 FROM retired_session_codes WHERE code = $2)
-       RETURNING id, code, name, created_at, waiting_room`,
+       RETURNING id, code, name, created_at, waiting_room, kept`,
       [sessionId, code, Date.now()],
     ).catch((err: unknown) => {
       // A clash with another session's code: try another.
@@ -1267,7 +1285,7 @@ export async function sessionOwnerId(sessionId: string): Promise<string | null> 
 
 export async function setWaitingRoom(sessionId: string, on: boolean): Promise<Session | null> {
   const { rows } = await pool.query<SessionRow>(
-    `UPDATE sessions SET waiting_room = $2 WHERE id = $1 RETURNING id, code, name, created_at, waiting_room`,
+    `UPDATE sessions SET waiting_room = $2 WHERE id = $1 RETURNING id, code, name, created_at, waiting_room, kept`,
     [sessionId, on],
   );
   return rows[0] ? toSession(rows[0]) : null;
@@ -1304,4 +1322,33 @@ export async function listWaiting(sessionId: string): Promise<{ id: string; disp
     [sessionId],
   );
   return rows.map((r) => ({ id: r.id, displayName: r.display_name }));
+}
+
+// --- ending, handing over, tidying ------------------------------------------------------
+
+/** The main room's owner is the session's owner: this hands it to someone else. */
+export async function setSessionOwner(sessionId: string, participantId: string): Promise<void> {
+  await pool.query(`UPDATE rooms SET created_by = $2 WHERE session_id = $1 AND is_main`, [sessionId, participantId]);
+}
+
+export async function getChatMessageAuthor(
+  messageId: string,
+): Promise<{ roomId: string; participantId: string } | null> {
+  const { rows } = await pool.query<{ room_id: string; participant_id: string }>(
+    `SELECT room_id, participant_id FROM chat_messages WHERE id = $1`,
+    [messageId],
+  );
+  return rows[0] ? { roomId: rows[0].room_id, participantId: rows[0].participant_id } : null;
+}
+
+export async function deleteChatMessage(messageId: string): Promise<void> {
+  await pool.query(`DELETE FROM chat_messages WHERE id = $1`, [messageId]);
+}
+
+export async function setSessionKept(sessionId: string, kept: boolean): Promise<Session | null> {
+  const { rows } = await pool.query<SessionRow>(
+    `UPDATE sessions SET kept = $2 WHERE id = $1 RETURNING id, code, name, created_at, waiting_room, kept`,
+    [sessionId, kept],
+  );
+  return rows[0] ? toSession(rows[0]) : null;
 }

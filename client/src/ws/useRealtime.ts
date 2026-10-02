@@ -257,8 +257,9 @@ export function useRealtime(credentials: Credentials | null): Realtime {
         if (teardownRef.current) return;
         // 4001: removed from the session by its owner. Reconnecting would only
         // come back as a stranger, so the connection stays closed.
-        // 4002: not let in by the waiting room. Same: stay closed.
-        if (event.code === 4001 || event.code === 4002) {
+        // 4002: not let in by the waiting room. 4003: the session was ended.
+        // In each case there is nothing to come back to: stay closed.
+        if (event.code === 4001 || event.code === 4002 || event.code === 4003) {
           setStatus("offline");
           return;
         }

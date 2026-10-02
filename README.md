@@ -326,7 +326,12 @@ How it runs across a horizontally scaled gateway:
 - **Keystrokes are batched.** Updates merge into one row per 400 ms per room instead of one per
   key: a whole cross-replica editing session measured at two rows. The window cannot lose work:
   every editor holds the full document, and the sync handshake on reconnect sends the server
-  exactly what it is missing - an edit survives even a replica dying before it saved.
+  exactly what it is missing - an edit survives even a replica dying before it saved. That
+  depends on the editor's copy outliving the connection, which it once did not: a dropped socket
+  took the whole room view down until the snapshot returned, unmounting the editor and destroying
+  its document with whatever it had not yet sent. The view now stays up through a reconnect
+  (`loadedRoomId`), and a test types while the socket is cut and reads the words back from the
+  server after a reload.
 - **Compaction happens in the database.** Batches fold into a snapshot under a transaction-scoped
   advisory lock, from what is stored rather than any replica's memory. It deletes exactly the rows
   it merged, never "everything up to seq N": a sequence number is taken at insert but visible only
@@ -500,9 +505,23 @@ a minute per person; a locked room's material is only askable by people let into
   **waiting room**: someone new then sees only "Waiting to be let in" until the owner admits or
   turns them away, and their socket is told nothing of the session meanwhile - no rooms, no
   participants, no messages. Anyone already admitted comes straight back.
-- **Guest identity.** There are no accounts: a participant id is effectively a bearer token, and
-  the owner-only endpoints are exactly as strong as that id. This is a deliberate scope choice
-  for a classroom tool, not an oversight.
+- **Members only, everywhere.** Every HTTP route authorises through one check, which also asks
+  whether the participant is still in the session: someone removed (or still in the waiting room)
+  keeps their participant id in their browser, and before that check it still read the notes,
+  searched the library and uploaded. Making a room needs a current member too, not just the code.
+- **Owners can hand over, and end.** The owner can make someone else the owner (they get the
+  waiting room, removals and ending; the previous owner becomes a member), or **end the session**:
+  everyone is told and sent back to the start, then every room, note, message and file is
+  deleted at once rather than after three idle days. Anyone may delete their own chat messages;
+  a room's owner and the session's owner may delete any.
+- **Guest identity, and getting it back.** There are no accounts: a participant id is effectively
+  a bearer token, and the owner-only endpoints are exactly as strong as that id - a deliberate
+  scope choice for a classroom tool. What would be lost with it (a cleared browser takes the
+  owner's controls with it) is covered by a **private link**: under the session code, *Copy my
+  private link* gives `/join/CODE#as=<id>`, which continues as you on any device. The id sits
+  after the `#`, which browsers never send to a server, so it stays out of logs and Referer
+  headers; the page says plainly that whoever holds it is you. Ordinary **invite links**
+  (`/join/CODE`) open the join screen with the code filled in.
 
 **Cross-language contracts are enforced, not remembered.** Worker job events are produced in
 Python and consumed in TypeScript. `npm run check:contracts` parses both definitions and fails
@@ -521,12 +540,54 @@ cost is bounded before anything is stored (`gateway/src/limits.ts`, `workers/com
 | Jobs queued or running, per session | 12                             | `LIMIT_ACTIVE_JOBS_PER_SESSION`                           |
 | Storage                          | 500 MB a room, 2 GB a session     | `LIMIT_ROOM_STORAGE_MB`, `LIMIT_SESSION_STORAGE_MB`       |
 | Sample rooms                     | 6 an hour per address             | `LIMIT_DEMOS_PER_HOUR`                                    |
+| New sessions                     | 30 an hour per address            | `LIMIT_SESSIONS_PER_HOUR`                                 |
+| Open connections                 | 100 per address                   | `LIMIT_CONNECTIONS_PER_ADDRESS`                           |
 | Questions (Ask the room)         | 6 a minute per person             |                                                           |
+| Chat, per connection             | 10 at once, then 1 a second       |                                                           |
+| Notes traffic, per connection    | 3000 frames and 16 MB at once, then 300 and 2 MB a second |                   |
 | Model calls                      | per task, per UTC day (below)     | `LLM_<TASK>_DAILY_BUDGET` (`0` = no limit)                |
 
 Rate windows are counted in Redis, so every replica enforces the same numbers; a refusal says
-which limit was hit and when it lifts, with `Retry-After`. Retries count as uploads - they spend
-the same GPU time.
+which limit was hit and when it lifts, with a `Retry-After` that is right even for someone who
+kept retrying (refused attempts count, so it is when a retry would fit, not when the oldest
+attempt expires). Retries count as uploads - they spend the same GPU time.
+
+**A refused upload is never stored.** The app names the uploader in the URL, so identity, room
+access, the rate limits and the declared size are all checked before the file is read; a refused
+file is read and thrown away rather than cut off, because a browser answered mid-upload reports a
+network error instead of the reason. An accepted file streams to disk, never into memory. The
+storage limit is then checked against the real size and the upload recorded *as one step* per
+session, under a Postgres advisory lock: measured separately, ten 60 MB uploads racing into a
+500 MB room all fitted; now eight go in and two are refused, as they should be.
+
+**Cheap things are limited too.** Chat, typing and notes frames cost nothing to send, which is
+what makes flooding a room with them easy, so each connection has token buckets for them
+(`gateway/src/ws/rateLimit.ts`). Chat past its limit is refused with a reason; typing is dropped;
+notes past theirs close the connection, because dropping a CRDT update would leave that editor
+out of step, while a reconnect resyncs the whole document. Normal use never comes near them.
+
+**Upload options are the operator's.** A strategy reads settings like which Whisper model to
+load, the device, beam size and tile size; those decide what a job costs, and one makes the
+worker download whatever model it is named. An upload may set only `denoise` and `language`;
+everything else is dropped by the gateway (`safeParams` in `media.ts`).
+
+**Sessions take turns for the workers.** The pools are shared, and on a CPU-only host a lecture
+takes longer to transcribe than it lasts: in arrival order, one group dropping in twelve would
+hold every other group up for a day. So jobs no longer go straight onto a pool's Redis queue -
+a Celery queue is first in, first out. They wait in Postgres, and a dispatcher
+(`gateway/src/queue/dispatcher.ts`, one replica at a time under an advisory lock) keeps each
+pool's queue topped up to two, choosing fairly (`queue/fair.ts`): a session's next job ranks
+behind what it already has in flight, so one with nothing running goes next whatever its arrival,
+and ties go to the session served longest ago. That last rule came from the end-to-end test,
+which failed half the time without it: on a fast pool a session's earlier jobs had finished
+before the next choice, so it tied with a session never served and won on age.
+
+**A waiting job shows its place in line.** Worker pools are shared by every session, so on a busy
+or CPU-only host a job waits behind other people's. While something in a room is queued, the
+feed reads where each job stands in its pool's queue (`/api/rooms/:roomId/queue`) and says "3
+ahead in the queue" or "Next in line" instead of an unchanging "Waiting for a worker". It is
+worked out with the dispatcher's own ordering, so the number is the order the work really
+happens in.
 
 **Model budgets pause a feature instead of failing jobs.** Free tiers cap requests per day -
 Gemini's image model at 20 - so each task profile has its own daily allowance of calls (image
@@ -539,7 +600,9 @@ still transcribed with a note that its summary is paused, and Ask returns the ma
 without an answer.
 
 **Nothing lives for ever.** A session nobody has touched for three days (`SESSION_TTL_DAYS`) is
-deleted - rooms, uploads, notes, chat, files. Activity is recorded at most every few minutes per
+deleted - rooms, uploads, notes, chat, files - or for thirty (`SESSION_KEEP_DAYS`) if its owner
+switched on **Keep for 30 days**: a group that meets weekly would otherwise lose its room between
+meetings. Everyone in the session sees which applies. Activity is recorded at most every few minutes per
 session, so typing is not a write per keystroke. An hourly sweep, one replica at a time under a
 Postgres advisory lock, deletes idle sessions and then any stored folder no row points at (a
 worker that finished writing after its upload was deleted). The landing page says so, and says
@@ -559,6 +622,11 @@ meeting note, with the results this app really produced for them (`gateway/demo/
 assembled from those saved results, so opening one costs no GPU time or model quota.
 
 ## Webhooks
+
+**Off in production unless `WEBHOOKS_ENABLED=true`, and the session owner's only.** An endpoint
+receives every job event of its session, signed file links included - registering one is reading
+everything - so each route below needs the owner's `participantId`. Before that they needed only
+the session code, and deleting, listing deliveries and replaying needed nothing at all.
 
 Job lifecycle events are delivered to registered endpoints as signed HTTP callbacks by a
 dispatcher that runs as its own container - same image as the gateway, different entrypoint, so
@@ -616,6 +684,81 @@ wherever they appear (`shared/src/scrub.ts`, `workers/common/errors.py`, both te
 The image, audio and video pools reserve an NVIDIA GPU. On a machine without one, remove the
 `deploy.resources` block from `x-ml-worker` in `infra/docker-compose.yml` - the reservation is a
 hard requirement for the container to start, though every strategy itself falls back to CPU.
+
+## Deploying
+
+A production stack is the development one with an override on top, for any host that runs
+Docker - a single VPS is enough:
+
+```bash
+# in .env, next to the model keys:
+#   DOMAIN=rmcollab.example            the public host name, pointed at this machine
+#   FILE_SIGNING_SECRET=...            openssl rand -hex 32
+#   POSTGRES_PASSWORD=...              openssl rand -hex 32
+#   REDIS_PASSWORD=...                 openssl rand -hex 32
+#   SENTRY_DSN=... VITE_SENTRY_DSN=... optional
+docker compose --env-file .env -f infra/docker-compose.yml -f infra/docker-compose.prod.yml up -d --build
+# on a host with an NVIDIA GPU, add:  -f infra/docker-compose.gpu.yml
+```
+
+What the override changes (`infra/docker-compose.prod.yml`):
+
+- **One public entrance.** `web` is Caddy (`infra/web`): it gets and renews the HTTPS certificate
+  by itself, serves the client as a static build, and proxies `/api`, `/ws` and `/files` to the
+  gateway replicas, which it finds by name - `--scale gateway=N` needs no config change. Ports 80
+  and 443 are the only ones published; the Vite dev server and the dev load balancer are not run.
+  It sets HSTS, `nosniff`, `X-Frame-Options` and caches hashed assets for good.
+- **Secrets are required, twice over.** Compose refuses to start without them, and the gateway
+  refuses to start in production with a development default: a short or default
+  `FILE_SIGNING_SECRET` (anyone could sign a link to any file), `ALLOWED_ORIGINS=*`, private
+  webhook targets allowed, or a non-https `PUBLIC_BASE_URL` (`productionProblems` in `config.ts`).
+  Postgres and Redis get passwords and no host ports.
+- **No GPU assumed, and measured without one.** `workers/tools/cpu_bench.py`, on 4 CPU cores
+  with the GPU hidden (an x86 desktop - a guide to a 4-core ARM VM, not a substitute):
+
+  | Work                             | Without a GPU                                   | So on a CPU-only host                       |
+  | -------------------------------- | ----------------------------------------------- | ------------------------------------------- |
+  | Whisper `small` transcription    | 2.66x real time (a 1-hour lecture: ~2.7 hours)   | not the default                             |
+  | Whisper `base` transcription     | 1.40x real time, same words to within one        | the default (`small` stays the GPU default) |
+  | Real-ESRGAN, one 1.6 MP photo    | unfinished after 28 minutes (>17 min per MP)     | offered as unavailable, with the reason     |
+
+  So without a GPU, image and video upscaling say "Upscaling needs a GPU, and this server has
+  none" and the pools fall back to sharpening, rather than taking jobs that would run for an hour
+  (`ALLOW_CPU_UPSCALE=true` offers them anyway). The GPU override gives the media pools the card
+  back, with both. The queue position in each card is what keeps a long transcription from
+  looking like a hang.
+
+- **Nightly backups.** The `backup` service dumps the database at 03:00 UTC (`BACKUP_HOUR_UTC`)
+  into `./backups`, keeping the newest 14 (`BACKUP_KEEP`). Each dump is written under a temporary
+  name and renamed only when complete, so one cut off half way never sits among the good ones.
+  Verified by restoring a dump into a scratch database: every row count matched, embeddings
+  included. Copy them off the machine too - a backup on the disk it protects survives a bad
+  deploy, not a lost disk. To restore one:
+
+  ```bash
+  docker compose ... exec -T postgres pg_restore --clean --if-exists --no-owner \
+    -U rmcollab -d rmcollab < backups/rmcollab-YYYYMMDD-HHMMSS.dump
+  ```
+
+- **Nothing operational is public.** `/api/metrics` answers only `Authorization: Bearer
+  $METRICS_TOKEN` in production (not at all without one), and the header's cluster panel is
+  left out of production builds. New sessions are limited to 30 an hour and open connections to
+  100 per address - generous, because a class on school wifi is one address.
+- **Runs on ARM.** Oracle's free Ampere machines are ARM: the GPU image installs PyTorch's CPU
+  build there, and every Python dependency ships ARM wheels (checked down to DeepFilterNet's Rust
+  core, CTranslate2 and ONNX Runtime), so nothing compiles on the server. CI builds every image
+  on a native ARM runner.
+
+**After a deploy**, `npm run smoke -- https://your-domain` checks the live site end to end and
+cleans up after itself: health, the app's security headers, http to https, a session joined over
+the socket, an upload processed by a worker, its signed link (and the same path unsigned
+refused), CORS refusing another site, metrics and webhooks closed, and the session ended. It
+exits non-zero on any failure, naming it, so it can gate a deploy script.
+
+Checked on this machine with `DOMAIN=localhost` (Caddy's locally trusted certificate): the app
+over https with HTTP redirected, a session joined over `wss://`, an upload processed by a worker,
+its signed link served over https, CORS granted to the app's own origin and to no other, and the
+gateway refusing to boot with weak settings, listing each one.
 
 ## Choosing a model
 
@@ -730,10 +873,29 @@ Three layers, from fastest to most real:
 | Unit (Python)       | `npm run test:workers`         | `pip install -r workers/requirements-dev.txt` | strategy registry, LLM provider selection, event throttling, comprehension pipeline, Ask tasks (in the worker image)                       |
 | End to end          | `npm run test:e2e`             | the stack running (`docker compose ... up`)   | real browsers and sockets against the live stack: fan-out, locked rooms, signed URLs, GPU enhancement, transcription, co-edited notes, export, Ask retrieval quality |
 | Cross-replica notes | `npm run check:notes-replicas` | `--scale gateway=2`                           | two editors pinned to different gateway replicas: edits, concurrent edits, late joiners and presence all crossing Redis               |
+| Other browsers      | `npm --prefix e2e run test:browsers` | the stack running                       | the specs that exercise the browser itself (editor, sockets, layout, dialogs) in Firefox and WebKit, Safari's engine                  |
+| After a deploy      | `npm run smoke -- <url>`       | a deployed site                               | the live site end to end, cleaning up after itself (see Deploying)                                                                    |
 
 `npm run typecheck` type-checks every TypeScript package. Python tests marked `ml` need the GPU
 image's dependencies and skip themselves elsewhere, so the suite runs anywhere. CI
 (`.github/workflows/ci.yml`) runs both unit layers on every push.
+
+**Accessibility** is checked automatically in the end-to-end suite: axe-core runs WCAG 2.1 A and
+AA rules over every main screen in light and dark (landing, privacy, notes, feed, chat, the
+invite menu, the waiting screen and a join request), and keyboard behaviour is asserted where it
+protects data - a destructive confirmation opens with Cancel focused, so a stray Enter never
+ends a session, and Escape backs out. Automated rules catch only part of what matters; this
+guards against regressions rather than replacing a pass with a screen reader.
+
+**Dependencies are audited, in what actually ships.** `npm audit` reports nothing, and
+`pip-audit` run inside both built worker images - the packages really installed, not the
+requirement ranges - finds no known vulnerabilities. Getting there meant moving the GPU image
+from PyTorch's CUDA 12.4 wheels, which stopped at torch 2.6.0 with eight published advisories,
+to CUDA 12.9 (torch 2.13, past the last advisory), and upgrading the base image's pip and
+setuptools. Not CUDA 13, though newer: transcription's CTranslate2 needs CUDA 12's cuBLAS, which
+the CUDA 12 torch wheels bring along - on CUDA 13 every transcription failed on the GPU, which
+the end-to-end suite caught. PyTorch's own wheels are invisible to pip-audit, so their version is checked
+against the advisories separately.
 
 The end-to-end suite is a standalone package, not a workspace, so Playwright never ends up in a
 production image. First run:
@@ -780,6 +942,10 @@ IPv4-mapped IPv6 into hex form, and an event guard that accepted `toString` as a
 | 14  | Sample room, recent sessions, rename and retry, follow-up questions, notes version history   | done   |
 | 15  | Several documents a room, removing people, ten-character codes with a guessing limit         | done   |
 | 16  | Waiting room, a new code after each removal, error tracking that never sends content         | done   |
+| 17  | Production stack: HTTPS front door, required secrets, GPU optional, queue position, flood limits | done   |
+| 18  | Invite links, private device links, handover, ending a session, chat deletion, a privacy page    | done   |
+| 19  | Owner-only webhooks, private metrics, per-address limits, ARM builds, nightly backups, smoke test | done   |
+| 20  | Sessions kept for 30 days on request; workers shared fairly between sessions                     | done   |
 
 Not planned: live audio/video calling (a deliberate scope cut - rooms are workspaces, not calls),
 and user accounts (groups return by session code; "my rooms across devices" needs real identity).
